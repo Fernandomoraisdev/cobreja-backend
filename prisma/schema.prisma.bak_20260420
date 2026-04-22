@@ -1,0 +1,101 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int     @id @default(autoincrement())
+  email     String  @unique
+  password  String
+  role      String  @default("ADMIN")
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id])
+
+  client    Client? 
+}
+
+model Account {
+  id      Int      @id @default(autoincrement())
+  name    String
+  users   User[]
+  clients Client[]
+  debts   Debt[]
+  payments Payment[]
+
+  creditRequests CreditRequest[] // 👈 NOVO
+}
+
+model Client {
+  id        Int     @id @default(autoincrement())
+  name      String
+  phone     String?
+
+  userId    Int?    @unique
+  user      User?   @relation(fields: [userId], references: [id])
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id])
+
+  debts     Debt[]
+  payments  Payment[]
+  creditRequests CreditRequest[] 
+}
+
+model Debt {
+  id          Int      @id @default(autoincrement())
+  amount      Float
+  total       Float
+
+  interest    Float?   // %
+  dailyRate   Float?   // %
+
+  dailyFee    Float    // 🔥 VALOR EM R$
+
+  dueDate     DateTime
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id])
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id])
+
+  createdAt   DateTime @default(now())
+}
+
+model CreditRequest {
+  id          Int      @id @default(autoincrement())
+  amount      Float
+  description String?
+
+  type        String   // CASH | PRODUCT | SERVICE
+  status      String   @default("PENDING") // PENDING | APPROVED | REJECTED
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id])
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id])
+
+  createdAt   DateTime @default(now())
+}
+
+model Payment {
+  id        Int      @id @default(autoincrement())
+  amount    Float
+  type      String
+  clientId  Int
+  client    Client   @relation(fields: [clientId], references: [id])
+  accountId Int
+  account   Account  @relation(fields: [accountId], references: [id])
+  createdAt DateTime @default(now())
+}

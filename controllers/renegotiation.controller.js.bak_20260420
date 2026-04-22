@@ -1,0 +1,54 @@
+const prisma = require('../prisma');
+
+// POST /api/renegotiation
+async function createRenegotiation(req, res) {
+  try {
+    const { oldDebtId, total, dueDate, dailyFee } = req.body;
+
+    if (!oldDebtId || total === undefined || !dueDate || dailyFee === undefined) {
+      return res.status(400).json({ message: 'oldDebtId, total, dueDate e dailyFee são obrigatórios', data: {} });
+    }
+
+    const oldDebt = await prisma.debt.findFirst({
+      where: {
+        id: Number(oldDebtId),
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!oldDebt) {
+      return res.status(404).json({ message: 'Dívida original não encontrada', data: {} });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const newDebt = await tx.debt.create({
+        data: {
+          amount: Number(total),
+          total: Number(total),
+          dailyFee: Number(dailyFee),
+          dueDate: new Date(dueDate),
+          clientId: oldDebt.clientId,
+          accountId: req.user.accountId
+        }
+      });
+
+      await tx.debt.delete({
+        where: { id: oldDebt.id }
+      });
+
+      return newDebt;
+    });
+
+    return res.json({
+      message: 'Renegociação criada com sucesso',
+      data: result
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao renegociar dívida', data: {} });
+  }
+}
+
+module.exports = {
+  createRenegotiation
+};

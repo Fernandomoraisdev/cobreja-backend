@@ -1,0 +1,126 @@
+require('dotenv').config();
+
+const express = require('express');
+const cors = require('cors');
+
+const prisma = require('./prisma');
+
+const clientRoutes = require('./routes/client.routes');
+const debtRoutes = require('./routes/debt.routes');
+const requestRoutes = require('./routes/request.routes');
+const paymentRoutes = require('./routes/payment.routes');
+const renegotiationRoutes = require('./routes/renegotiation.routes');
+
+const authMiddleware = require('./authMiddleware');
+const adminMiddleware = require('./adminMiddleware');
+
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+const SECRET = 'cobreja-super-secreta';
+
+const app = express();
+
+// 🔥 PRIMEIRO
+app.use(cors());
+app.use(express.json());
+
+// 🔥 ROTAS
+app.use('/api/client', clientRoutes);
+app.use('/api/debt', debtRoutes);
+app.use('/api/request', requestRoutes);
+app.use('/api/payment', paymentRoutes);
+app.use('/api/renegotiation', renegotiationRoutes);
+
+// TESTE
+app.get('/teste-saas', authMiddleware, (req, res) => {
+  res.json({
+    message: 'SaaS funcionando',
+    accountId: req.user.accountId,
+    user: req.user
+  });
+});
+
+app.get('/me', authMiddleware, (req, res) => {
+  res.json({
+    user: req.user
+  });
+});
+
+// LOGIN
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await prisma.user.findUnique({
+    where: { email }
+  });
+
+  if (!user) {
+    return res.status(401).json({ message: 'Usuário não encontrado' });
+  }
+
+  const isMatch = await bcrypt.compare(password, user.password);
+
+  if (!isMatch) {
+    return res.status(401).json({ message: 'Senha inválida' });
+  }
+
+  const token = jwt.sign({
+    id: user.id,
+    email: user.email,
+    accountId: user.accountId,
+    role: user.role
+  }, SECRET);
+
+  res.json({
+    message: 'Login realizado',
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+    },
+  });
+});
+
+// REGISTER
+app.post('/register', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const userExists = await prisma.user.findUnique({
+      where: { email }
+    });
+
+    if (userExists) {
+      return res.status(400).json({ message: 'Usuário já existe' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        account: {
+          create: {
+            name: email
+          }
+        }
+      }
+    });
+
+    res.json({ message: 'Usuário criado com sucesso', user });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: 'Erro no cadastro' });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('🚀 Backend rodando!');
+});
+
+app.listen(3000, '0.0.0.0', () => {
+  console.log('🔥 Servidor rodando em http://localhost:3000');
+});

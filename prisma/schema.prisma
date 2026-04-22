@@ -1,0 +1,274 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  CLIENT
+}
+
+enum ClientStatus {
+  ACTIVE
+  EXCLUDED
+}
+
+enum DebtStatus {
+  ACTIVE
+  SETTLED
+  RENEGOTIATED
+  EXCLUDED
+}
+
+enum DebtKind {
+  STANDARD
+  RENEGOTIATED
+}
+
+enum InterestMode {
+  PERCENTAGE
+  FIXED
+}
+
+enum PaymentType {
+  JUROS
+  PARCIAL
+  TOTAL
+  PARCELA
+}
+
+enum RenegotiationStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum InstallmentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  PARTIAL
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String?
+  email     String   @unique
+  cpf       String?  @unique
+  password  String
+  phone     String?
+  avatarUrl String?
+  role      UserRole @default(ADMIN)
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  client    Client?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model Account {
+  id             Int             @id @default(autoincrement())
+  name           String
+  users          User[]
+  clients        Client[]
+  debts          Debt[]
+  payments       Payment[]
+  renegotiations Renegotiation[]
+  installments   Installment[]
+
+  creditRequests CreditRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model Client {
+  id        Int          @id @default(autoincrement())
+  name      String
+  cpf       String?
+  address   String?
+  phone     String?
+  email     String?
+  avatarUrl String?
+  notes     String?
+  status    ClientStatus @default(ACTIVE)
+  deletedAt DateTime?
+
+  userId    Int?   @unique
+  user      User?  @relation(fields: [userId], references: [id])
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  debts          Debt[]
+  payments       Payment[]
+  renegotiations Renegotiation[]
+  installments   Installment[]
+  creditRequests CreditRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([accountId, cpf])
+  @@unique([accountId, email])
+  @@index([accountId, status])
+}
+
+model Debt {
+  id                    Int          @id @default(autoincrement())
+  title                 String?
+  kind                  DebtKind     @default(STANDARD)
+  status                DebtStatus   @default(ACTIVE)
+  principalAmount       Float      @default(0)
+  principalOutstanding  Float      @default(0)
+  monthlyInterestMode   InterestMode?
+  monthlyInterestValue  Float?
+  dailyInterestMode     InterestMode?
+  dailyInterestValue    Float?
+  currentCycleInterestPaid Float     @default(0)
+  borrowedAt            DateTime   @default(now())
+  originalDueDate       DateTime   @default(now())
+  dueDate               DateTime
+  lastInterestPaidAt    DateTime?
+  settledAt             DateTime?
+  deletedAt             DateTime?
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  renegotiationId Int?
+  renegotiation   Renegotiation? @relation(fields: [renegotiationId], references: [id])
+
+  originDebtId Int?
+  originDebt   Debt?   @relation("DebtOrigin", fields: [originDebtId], references: [id])
+  childDebts   Debt[]  @relation("DebtOrigin")
+
+  payments     Payment[]
+  installments Installment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status, kind])
+  @@index([clientId, status])
+}
+
+model Renegotiation {
+  id                Int                  @id @default(autoincrement())
+  status            RenegotiationStatus  @default(ACTIVE)
+  originalTotal     Float
+  multiplier        Float?
+  negotiatedTotal   Float
+  installmentCount  Int
+  installmentAmount Float
+  startedAt         DateTime
+  firstDueDate      DateTime
+  dailyInterestMode InterestMode?
+  dailyInterestValue Float?
+  note              String?
+  sourceDebtIds     Json?
+  completedAt       DateTime?
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  debts       Debt[]
+  installments Installment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status])
+  @@index([clientId, status])
+}
+
+model Installment {
+  id                Int               @id @default(autoincrement())
+  installmentNumber Int
+  amount            Float
+  paidAmount        Float             @default(0)
+  dueDate           DateTime
+  paidAt            DateTime?
+  status            InstallmentStatus @default(PENDING)
+  note              String?
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  renegotiationId Int
+  renegotiation   Renegotiation @relation(fields: [renegotiationId], references: [id], onDelete: Cascade)
+
+  debtId      Int?
+  debt        Debt?      @relation(fields: [debtId], references: [id])
+
+  payments    Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([renegotiationId, installmentNumber])
+  @@index([accountId, status])
+}
+
+model CreditRequest {
+  id          Int      @id @default(autoincrement())
+  amount      Float
+  description String?
+  type        String
+  status      String   @default("PENDING")
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+}
+
+model Payment {
+  id              Int         @id @default(autoincrement())
+  type            PaymentType
+  amount          Float
+  principalAmount Float       @default(0)
+  interestAmount  Float       @default(0)
+  dailyAmount     Float       @default(0)
+  note            String?
+  receiptUrl      String?
+  paidAt          DateTime    @default(now())
+
+  clientId        Int
+  client          Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  debtId          Int?
+  debt            Debt?       @relation(fields: [debtId], references: [id])
+
+  installmentId   Int?
+  installment     Installment? @relation(fields: [installmentId], references: [id])
+
+  accountId       Int
+  account         Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, type])
+  @@index([clientId, paidAt])
+  @@index([debtId, paidAt])
+}

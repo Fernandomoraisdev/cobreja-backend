@@ -1,0 +1,153 @@
+const prisma = require('../prisma');
+const { applyPaymentRules } = require('../services/payment.service');
+
+// POST /api/payment
+async function createPayment(req, res) {
+  try {
+    const { clientId, debtId, amount, type } = req.body;
+    const normalizedType = type ? String(type).toLowerCase() : '';
+
+    if (!clientId || !amount || !normalizedType) {
+      return res.status(400).json({ message: 'clientId, amount e type são obrigatórios', data: {} });
+    }
+
+    if (!['total', 'juros', 'parcial'].includes(normalizedType)) {
+      return res.status(400).json({ message: 'Tipo de pagamento inválido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: Number(clientId),
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    let debt = null;
+
+    if (debtId) {
+      debt = await prisma.debt.findFirst({
+        where: {
+          id: Number(debtId),
+          clientId: Number(clientId),
+          accountId: req.user.accountId
+        }
+      });
+    } else {
+      debt = await prisma.debt.findFirst({
+        where: {
+          clientId: Number(clientId),
+          accountId: req.user.accountId,
+          total: { gt: 0 }
+        },
+        orderBy: { dueDate: 'asc' }
+      });
+    }
+
+    if (!debt) {
+      return res.status(404).json({ message: 'Dívida não encontrada para pagamento', data: {} });
+    }
+
+    const { newTotal, paidAmount } = applyPaymentRules(debt, Number(amount), normalizedType);
+
+    const [payment, updatedDebt] = await prisma.$transaction([
+      prisma.payment.create({
+        data: {
+          amount: paidAmount,
+          type: normalizedType,
+          clientId: Number(clientId),
+          accountId: req.user.accountId
+        }
+      }),
+      prisma.debt.update({
+        where: { id: debt.id },
+        data: { total: newTotal }
+      })
+    ]);
+
+    return res.json({
+      message: 'Pagamento registrado com sucesso',
+      data: {
+        payment,
+        debt: updatedDebt
+      }
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao registrar pagamento', data: {} });
+  }
+}
+
+// GET /api/payment/history
+async function getPaymentHistory(req, res) {
+  try {
+    const payments = await prisma.payment.findMany({
+      where: {
+        accountId: req.user.accountId
+      },
+      include: {
+        client: true
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+
+    return res.json({
+      message: 'Histórico de pagamentos listado com sucesso',
+      data: payments
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao listar histórico de pagamentos', data: {} });
+  }
+}
+
+// GET /api/payment/client/:clientId
+async function getPaymentHistoryByClient(req, res) {
+  try {
+    const clientId = Number(req.params.clientId);
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente inválido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    const payments = await prisma.payment.findMany({
+      where: {
+        clientId,
+        accountId: req.user.accountId
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+
+    return res.json({
+      message: 'Histórico do cliente listado com sucesso',
+      data: payments
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao listar histórico do cliente', data: {} });
+  }
+}
+
+module.exports = {
+  createPayment,
+  getPaymentHistory,
+  getPaymentHistoryByClient
+};

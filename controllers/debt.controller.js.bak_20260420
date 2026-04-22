@@ -1,0 +1,255 @@
+const prisma = require('../prisma');
+
+// GET /my-debts
+async function getMyDebts(req, res) {
+  try {
+    // buscar client vinculado ao user
+    const client = await prisma.client.findUnique({
+      where: {
+        userId: req.user.id
+      },
+      select: {
+        id: true,
+        accountId: true
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado' });
+    }
+
+    // buscar dívidas
+    const debts = await prisma.debt.findMany({
+      where: {
+        clientId: client.id,
+        accountId: req.user.accountId
+      }
+    });
+
+    const today = new Date();
+
+    const debtsWithCalc = debts.map(debt => {
+      let daysLate = 0;
+      let updatedTotal = debt.total;
+
+      if (today > debt.dueDate) {
+        const diffTime = today - new Date(debt.dueDate);
+        daysLate = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        updatedTotal = debt.total + (daysLate * debt.dailyFee);
+      }
+
+      return {
+        ...debt,
+        daysLate,
+        updatedTotal
+      };
+    });
+
+    res.json({ debts: debtsWithCalc });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: 'Erro ao buscar dívidas' });
+  }
+}
+
+// POST /debts
+async function createDebt(req, res) {
+  try {
+    const {
+      clientId,
+      amount,
+      interestPercent,
+      interestValue,
+      dailyPercent,
+      dailyFee,
+      dueDate
+    } = req.body;
+
+    if (!clientId || !dueDate) {
+      return res.status(400).json({ message: 'clientId e dueDate são obrigatórios', data: {} });
+    }
+
+    let total = req.body.total;
+
+    if (total === undefined) {
+      if (interestPercent) {
+        total = amount + (amount * (interestPercent / 100));
+      } else if (interestValue) {
+        total = amount + interestValue;
+      } else if (amount !== undefined) {
+        total = amount;
+      } else {
+        return res.status(400).json({ message: 'Informe total ou campos de cálculo da dívida', data: {} });
+      }
+    }
+
+    let finalDailyFee = dailyFee;
+
+    if (finalDailyFee === undefined) {
+      if (dailyPercent) {
+        finalDailyFee = total * (dailyPercent / 100);
+      } else {
+        return res.status(400).json({ message: 'Informe dailyFee ou dailyPercent', data: {} });
+      }
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: Number(clientId),
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado para esta conta', data: {} });
+    }
+
+    const debt = await prisma.debt.create({
+      data: {
+        amount: amount !== undefined ? Number(amount) : Number(total),
+        total: Number(total),
+        interest: interestPercent || null,
+        dailyRate: dailyPercent || null,
+        dailyFee: Number(finalDailyFee),
+        dueDate: new Date(dueDate),
+        clientId,
+        accountId: req.user.accountId
+      }
+    });
+
+    return res.json({
+      message: 'Dívida criada',
+      data: debt
+    });
+
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao criar dívida', data: {} });
+  }
+}
+
+// GET /client/:clientId
+async function getDebtsByClient(req, res) {
+  try {
+    const clientId = Number(req.params.clientId);
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente inválido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    const debts = await prisma.debt.findMany({
+      where: {
+        clientId,
+        accountId: req.user.accountId
+      },
+      orderBy: { id: 'desc' }
+    });
+
+    return res.json({
+      message: 'Dívidas listadas com sucesso',
+      data: debts
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao listar dívidas do cliente', data: {} });
+  }
+}
+
+// PUT /:id
+async function updateDebt(req, res) {
+  try {
+    const debtId = Number(req.params.id);
+    const { total, dueDate, dailyFee } = req.body;
+
+    if (!debtId) {
+      return res.status(400).json({ message: 'ID da dívida inválido', data: {} });
+    }
+
+    if (total === undefined && !dueDate && dailyFee === undefined) {
+      return res.status(400).json({ message: 'Informe total, dueDate ou dailyFee', data: {} });
+    }
+
+    const debt = await prisma.debt.findFirst({
+      where: {
+        id: debtId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!debt) {
+      return res.status(404).json({ message: 'Dívida não encontrada', data: {} });
+    }
+
+    const updatedDebt = await prisma.debt.update({
+      where: { id: debtId },
+      data: {
+        ...(total !== undefined ? { total: Number(total) } : {}),
+        ...(dueDate ? { dueDate: new Date(dueDate) } : {}),
+        ...(dailyFee !== undefined ? { dailyFee: Number(dailyFee) } : {})
+      }
+    });
+
+    return res.json({
+      message: 'Dívida atualizada com sucesso',
+      data: updatedDebt
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao atualizar dívida', data: {} });
+  }
+}
+
+// DELETE /:id
+async function deleteDebt(req, res) {
+  try {
+    const debtId = Number(req.params.id);
+
+    if (!debtId) {
+      return res.status(400).json({ message: 'ID da dívida inválido', data: {} });
+    }
+
+    const debt = await prisma.debt.findFirst({
+      where: {
+        id: debtId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!debt) {
+      return res.status(404).json({ message: 'Dívida não encontrada', data: {} });
+    }
+
+    await prisma.debt.delete({
+      where: { id: debtId }
+    });
+
+    return res.json({
+      message: 'Dívida removida com sucesso',
+      data: {}
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao remover dívida', data: {} });
+  }
+}
+
+module.exports = {
+  getMyDebts,
+  createDebt,
+  getDebtsByClient,
+  updateDebt,
+  deleteDebt
+};

@@ -1,0 +1,313 @@
+const prisma = require('../prisma');
+
+// GET /my-requests
+async function getMyRequests(req, res) {
+  try {
+    const userId = req.user.id;
+
+    // buscar client vinculado ao user
+    const client = await prisma.client.findUnique({
+      where: { userId }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado' });
+    }
+
+    // buscar pedidos do cliente
+    const requests = await prisma.creditRequest.findMany({
+      where: {
+        clientId: client.id,
+        accountId: req.user.accountId
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+
+    res.json({ requests });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Erro ao buscar pedidos' });
+  }
+}
+
+async function linkClient(req, res) {
+   try {
+     const { userId, clientId } = req.body;
+ 
+     const client = await prisma.client.update({
+       where: { id: clientId },
+       data: {
+         userId: userId
+       }
+     });
+ 
+     res.json({
+       message: 'Cliente vinculado ao usuário',
+       client
+     });
+ 
+   } catch (err) {
+     console.log(err);
+     res.status(500).json({ message: 'Erro ao vincular cliente' });
+   }
+ }
+
+ // POST /clients (ADMIN)
+async function createClient(req, res) {
+  try {
+    const { name, phone } = req.body;
+
+    const client = await prisma.client.create({
+      data: {
+        name,
+        phone,
+        accountId: req.user.accountId
+      }
+    });
+
+    res.json({
+      message: 'Cliente criado',
+      client
+    });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: 'Erro ao criar cliente' });
+  }
+}
+
+// GET /clients/summary (ADMIN)
+async function getClientsSummary(req, res) {
+  try {
+    const clients = await prisma.client.findMany({
+      where: { accountId: req.user.accountId },
+      include: { debts: true }
+    });
+
+    const today = new Date();
+
+    let totalToReceive = 0;
+    let totalReceived = 0;
+    let totalOverdue = 0;
+    let totalLent = 0;
+
+    const result = clients.map(c => {
+      let totalOriginal = 0;
+      let totalUpdated = 0;
+
+      const debts = c.debts.map(d => {
+        let daysLate = 0;
+        let updatedTotal = d.total;
+
+        if (today > d.dueDate) {
+          const diff = today - new Date(d.dueDate);
+          daysLate = Math.ceil(diff / (1000 * 60 * 60 * 24));
+          updatedTotal = d.total + (daysLate * d.dailyFee);
+
+          totalOverdue += updatedTotal;
+        }
+
+        totalOriginal += d.total;
+        totalUpdated += updatedTotal;
+
+        totalLent += d.total;
+        totalToReceive += updatedTotal;
+
+        return {
+          id: d.id,
+          total: d.total,
+          updatedTotal,
+          daysLate
+        };
+      });
+
+      return {
+        clientId: c.id,
+        name: c.name,
+        phone: c.phone,
+        totalOriginal,
+        totalUpdated,
+        debts
+      };
+    });
+
+    res.json({
+      totalToReceive,
+      totalReceived,
+      totalOverdue,
+      totalLent,
+      clients: result
+    });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: 'Erro ao montar resumo' });
+  }
+}
+
+// GET /clients
+async function getClients(req, res) {
+  try {
+    const clients = await prisma.client.findMany({
+      where: { accountId: req.user.accountId },
+      orderBy: { id: 'desc' }
+    });
+
+    return res.json({
+      message: 'Clientes listados com sucesso',
+      data: clients
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao listar clientes', data: {} });
+  }
+}
+
+// GET /clients/:id
+async function getClientById(req, res) {
+  try {
+    const clientId = Number(req.params.id);
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente inválido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId
+      },
+      include: {
+        debts: {
+          orderBy: { id: 'desc' }
+        },
+        payments: {
+          orderBy: { createdAt: 'desc' }
+        }
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    return res.json({
+      message: 'Cliente encontrado com sucesso',
+      data: client
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao buscar cliente', data: {} });
+  }
+}
+
+// PUT /clients/:id
+async function updateClient(req, res) {
+  try {
+    const clientId = Number(req.params.id);
+    const { name, phone } = req.body;
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente inválido', data: {} });
+    }
+
+    if (!name && !phone) {
+      return res.status(400).json({ message: 'Informe nome ou telefone para atualizar', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    const updatedClient = await prisma.client.update({
+      where: { id: clientId },
+      data: {
+        ...(name ? { name } : {}),
+        ...(phone !== undefined ? { phone } : {})
+      }
+    });
+
+    return res.json({
+      message: 'Cliente atualizado com sucesso',
+      data: updatedClient
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao atualizar cliente', data: {} });
+  }
+}
+
+// DELETE /clients/:id
+async function deleteClient(req, res) {
+  try {
+    const clientId = Number(req.params.id);
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente inválido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId
+      }
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente não encontrado', data: {} });
+    }
+
+    await prisma.$transaction([
+      prisma.payment.deleteMany({
+        where: {
+          clientId,
+          accountId: req.user.accountId
+        }
+      }),
+      prisma.creditRequest.deleteMany({
+        where: {
+          clientId,
+          accountId: req.user.accountId
+        }
+      }),
+      prisma.debt.deleteMany({
+        where: {
+          clientId,
+          accountId: req.user.accountId
+        }
+      }),
+      prisma.client.delete({
+        where: { id: clientId }
+      })
+    ]);
+
+    return res.json({
+      message: 'Cliente removido com sucesso',
+      data: {}
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao remover cliente', data: {} });
+  }
+}
+
+module.exports = {
+  getMyRequests,
+  linkClient,
+  createClient,
+  getClientsSummary,
+  getClients,
+  getClientById,
+  updateClient,
+  deleteClient
+};
