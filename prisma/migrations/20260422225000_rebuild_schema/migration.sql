@@ -1,4 +1,4 @@
-﻿-- CreateEnum
+-- CreateEnum
 -- Rebuild schema for the new COBREJÁ backend foundation.
 -- This project started with a minimal "User" table. We drop it to avoid
 -- conflicts and recreate the full schema below (safe for fresh installs).
