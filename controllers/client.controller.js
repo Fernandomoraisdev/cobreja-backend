@@ -349,10 +349,12 @@ async function createClientLogin(req, res) {
     }
 
     const cpf = normalizeCpf(req.body.cpf ?? client.cpf);
-    const email =
-      normalizeEmail(req.body.email ?? client.email) ?? `cliente-${client.id}@cobreja.local`;
+    const clientEmail = normalizeEmail(req.body.email ?? client.email);
+    // O User.email é obrigatório no banco. Se o cliente não tiver email, geramos um placeholder
+    // só para fins de autenticação, mas não salvamos isso no perfil do cliente.
+    const email = clientEmail ?? `cliente-${client.id}@cobreja.local`;
 
-    if (!cpf && !email) {
+    if (!cpf && !clientEmail) {
       return res.status(400).json({
         message: 'Informe email ou CPF para gerar o login do cliente',
         data: {},
@@ -373,6 +375,17 @@ async function createClientLogin(req, res) {
         message: 'Ja existe um usuario com este email ou CPF',
         data: {},
       });
+    }
+
+    const duplicatedMessage = await ensureClientUniqueness({
+      accountId: req.user.accountId,
+      cpf,
+      email: clientEmail,
+      ignoreClientId: clientId,
+    });
+
+    if (duplicatedMessage) {
+      return res.status(400).json({ message: duplicatedMessage, data: {} });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -396,7 +409,15 @@ async function createClientLogin(req, res) {
 
       const updatedClient = await tx.client.update({
         where: { id: client.id },
-        data: { userId: user.id },
+        data: {
+          userId: user.id,
+          // Mantém o perfil do cliente preenchido com dados reais quando informados.
+          ...(cpf ? { cpf } : {}),
+          ...(clientEmail ? { email: clientEmail } : {}),
+          ...(phone ? { phone } : {}),
+          ...(avatarUrl ? { avatarUrl } : {}),
+          ...(name ? { name } : {}),
+        },
         include: baseClientInclude,
       });
 

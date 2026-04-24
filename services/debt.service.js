@@ -72,11 +72,11 @@ function calculateDailyAccruedAmount(debt, now = new Date()) {
     return 0;
   }
 
-  const interestOutstanding = calculateInterestOutstanding(debt);
-  const baseAmount =
-    interestOutstanding > MONEY_EPSILON
-      ? interestOutstanding
-      : Number(debt.principalOutstanding ?? debt.principalAmount ?? 0);
+  // Mora (diaria) deve incidir sobre o principal em aberto.
+  // Assim, quando ha juros pendentes, a diaria nao fica "pequena demais"
+  // por estar calculada em cima do juro mensal, e o valor continua coerente
+  // com o saldo que realmente esta em atraso.
+  const baseAmount = Number(debt.principalOutstanding ?? debt.principalAmount ?? 0);
 
   const perDay = debt.dailyInterestMode === 'PERCENTAGE'
     ? roundMoney(baseAmount * value / 100)
@@ -149,8 +149,14 @@ function markStateSettled(state, paidAt) {
   state.settledAt = new Date(paidAt);
 }
 
-function maybeAdvanceCycle(state, snapshot, paidInterest, paidAt) {
-  if (snapshot.interestOutstanding - paidInterest <= MONEY_EPSILON && snapshot.monthlyInterestAmount > 0) {
+function maybeAdvanceCycle(state, snapshot, paidInterest, paidDaily, paidAt) {
+  const interestSettled =
+    snapshot.interestOutstanding - paidInterest <= MONEY_EPSILON &&
+    snapshot.monthlyInterestAmount > 0;
+  const dailySettled =
+    snapshot.dailyAccruedAmount - paidDaily <= MONEY_EPSILON;
+
+  if (interestSettled && dailySettled) {
     state.lastInterestPaidAt = new Date(paidAt);
     state.dueDate = addMonthsKeepingDay(state.dueDate, 1);
     state.currentCycleInterestPaid = 0;
@@ -158,21 +164,26 @@ function maybeAdvanceCycle(state, snapshot, paidInterest, paidAt) {
 }
 
 function applyInterestPaymentToState(state, amount, paidAt) {
+  let remaining = roundMoney(Number(amount || 0));
   const snapshot = calculateDebtSnapshot(state, paidAt);
+
+  const paidDaily = roundMoney(Math.min(remaining, snapshot.dailyAccruedAmount));
+  remaining = roundMoney(remaining - paidDaily);
+
   const appliedInterest = roundMoney(
-    Math.min(Number(amount || 0), snapshot.interestOutstanding),
+    Math.min(remaining, snapshot.interestOutstanding),
   );
 
   state.currentCycleInterestPaid = roundMoney(
     Number(state.currentCycleInterestPaid || 0) + appliedInterest,
   );
-  maybeAdvanceCycle(state, snapshot, appliedInterest, paidAt);
+  maybeAdvanceCycle(state, snapshot, appliedInterest, paidDaily, paidAt);
 
   return {
-    amount: appliedInterest,
+    amount: roundMoney(paidDaily + appliedInterest),
     principalAmount: 0,
     interestAmount: appliedInterest,
-    dailyAmount: 0,
+    dailyAmount: paidDaily,
   };
 }
 
@@ -188,7 +199,7 @@ function applyPartialPaymentToState(state, amount, paidAt) {
     Number(state.currentCycleInterestPaid || 0) + paidInterest,
   );
   remaining = roundMoney(remaining - paidInterest);
-  maybeAdvanceCycle(state, snapshot, paidInterest, paidAt);
+  maybeAdvanceCycle(state, snapshot, paidInterest, paidDaily, paidAt);
 
   const paidPrincipal = roundMoney(
     Math.min(remaining, Number(state.principalOutstanding || 0)),
