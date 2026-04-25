@@ -3,8 +3,20 @@ const {
   MONEY_EPSILON,
   simulatePaymentsForDebt,
   buildDebtUpdateFromState,
+  addMonthsKeepingDay,
   roundMoney,
 } = require('../services/debt.service');
+
+function startOfDay(value) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function isSameDay(left, right) {
+  if (!left || !right) return false;
+  return startOfDay(left).getTime() === startOfDay(right).getTime();
+}
 
 function normalizePaymentType(value) {
   const normalized = String(value || '').trim().toUpperCase();
@@ -422,11 +434,25 @@ async function deletePayment(req, res) {
         id: paymentId,
         accountId: req.user.accountId,
       },
+      include: {
+        debt: true,
+      },
     });
 
     if (!existingPayment) {
       return res.status(404).json({ message: 'Pagamento nao encontrado', data: {} });
     }
+
+    const debtBefore = existingPayment.debtId ? existingPayment.debt : null;
+    const shouldRollbackCycle =
+      Boolean(debtBefore) &&
+      Boolean(debtBefore.lastInterestPaidAt) &&
+      [ 'JUROS', 'PARCIAL' ].includes(String(existingPayment.type || '').toUpperCase()) &&
+      new Date(debtBefore.lastInterestPaidAt).getTime() === new Date(existingPayment.paidAt).getTime();
+
+    const expectedDueDate = shouldRollbackCycle
+      ? addMonthsKeepingDay(new Date(debtBefore.dueDate), -1)
+      : null;
 
     await prisma.$transaction(async (tx) => {
       await tx.payment.delete({
@@ -434,7 +460,50 @@ async function deletePayment(req, res) {
       });
 
       if (existingPayment.debtId) {
-        await recalculateDebtAndRelations(tx, existingPayment.debtId);
+        let updatedDebt = await recalculateDebtAndRelations(tx, existingPayment.debtId);
+
+        // Se o pagamento removido era exatamente o ultimo juros (ciclo) registrado, esperamos que o vencimento
+        // volte 1 mes. Se isso nao acontecer, geralmente eh sinal de `originalDueDate` ter sido sobrescrito
+        // anteriormente. Tentamos reparar ajustando o `originalDueDate` para o valor coerente com o rollback.
+        if (shouldRollbackCycle && updatedDebt && expectedDueDate && !isSameDay(updatedDebt.dueDate, expectedDueDate)) {
+          const debtAfter = await tx.debt.findFirst({
+            where: { id: existingPayment.debtId },
+            include: {
+              payments: {
+                orderBy: { paidAt: 'asc' },
+              },
+            },
+          });
+
+          if (!debtAfter) return;
+
+          const payments = debtAfter.payments || [];
+          const maxAttempts = Math.min(120, Math.max(payments.length + 24, 12));
+
+          for (let monthsBack = 0; monthsBack <= maxAttempts; monthsBack += 1) {
+            const candidateOriginalDueDate = addMonthsKeepingDay(expectedDueDate, -monthsBack);
+            const simulation = simulatePaymentsForDebt(
+              {
+                ...debtAfter,
+                originalDueDate: candidateOriginalDueDate,
+                dueDate: candidateOriginalDueDate,
+              },
+              payments,
+            );
+
+            if (isSameDay(simulation.state.dueDate, expectedDueDate)) {
+              await tx.debt.update({
+                where: { id: existingPayment.debtId },
+                data: {
+                  originalDueDate: candidateOriginalDueDate,
+                },
+              });
+
+              updatedDebt = await recalculateDebtAndRelations(tx, existingPayment.debtId);
+              break;
+            }
+          }
+        }
       }
     });
 

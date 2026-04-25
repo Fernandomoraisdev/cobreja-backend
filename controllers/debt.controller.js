@@ -30,6 +30,17 @@ function toNullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function startOfDay(value) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function isSameDay(left, right) {
+  if (!left || !right) return false;
+  return startOfDay(left).getTime() === startOfDay(right).getTime();
+}
+
 async function getMyDebts(req, res) {
   try {
     const client = await prisma.client.findUnique({
@@ -196,6 +207,21 @@ async function updateDebt(req, res) {
       return res.status(404).json({ message: 'Divida nao encontrada', data: {} });
     }
 
+    const requestedDueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
+    const requestedOriginalDueDate = req.body.originalDueDate ? new Date(req.body.originalDueDate) : null;
+
+    // IMPORTANTE:
+    // - `originalDueDate` eh a data-base usada para reprocessar (replay) os pagamentos.
+    // - Ela NAO deve ser sobrescrita quando o frontend apenas reenviar `dueDate` sem o usuario mudar nada.
+    // - Para manter compatibilidade com o frontend atual (que envia `dueDate`), so tratamos `dueDate`
+    //   como alteracao de `originalDueDate` quando ele realmente difere do vencimento atual.
+    const nextOriginalDueDate =
+      requestedOriginalDueDate
+        ? requestedOriginalDueDate
+        : requestedDueDate && !isSameDay(requestedDueDate, debt.dueDate)
+          ? requestedDueDate
+          : debt.originalDueDate;
+
     const draftDebt = {
       ...debt,
       title: req.body.title !== undefined ? String(req.body.title || '').trim() || null : debt.title,
@@ -230,10 +256,15 @@ async function updateDebt(req, res) {
               : toNullableNumber(req.body.dailyFee ?? req.body.dailyInterestValue))
           : debt.dailyInterestValue,
       borrowedAt: req.body.borrowedAt ? new Date(req.body.borrowedAt) : debt.borrowedAt,
-      originalDueDate: req.body.dueDate ? new Date(req.body.dueDate) : debt.originalDueDate,
-      dueDate: req.body.dueDate ? new Date(req.body.dueDate) : debt.originalDueDate,
+      originalDueDate: nextOriginalDueDate,
+      // `dueDate` atual sera recalculado via replay (buildDebtUpdateFromState), mas mantemos aqui o valor atual
+      // para nao confundir outros usos futuros do draft.
+      dueDate: debt.dueDate,
       status: req.body.status ? String(req.body.status).toUpperCase() : debt.status,
-      deletedAt: req.body.deletedAt ? new Date(req.body.deletedAt) : null,
+      deletedAt:
+        req.body.deletedAt !== undefined
+          ? (req.body.deletedAt ? new Date(req.body.deletedAt) : null)
+          : debt.deletedAt,
     };
 
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
