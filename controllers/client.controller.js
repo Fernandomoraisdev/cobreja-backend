@@ -37,6 +37,17 @@ function normalizeCpf(value) {
   return digits || null;
 }
 
+function normalizeClientName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  // Match across case/whitespace/accents (helps consolidating legacy duplicates).
+  return raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
 function serializePayment(payment) {
   return {
     id: payment.id,
@@ -317,6 +328,7 @@ async function createClientLogin(req, res) {
   try {
     const clientId = Number(req.params.id);
     const password = String(req.body.password || '');
+    const mergeByName = Boolean(req.body.mergeByName);
 
     if (!clientId) {
       return res.status(400).json({ message: 'ID do cliente invalido', data: {} });
@@ -418,10 +430,89 @@ async function createClientLogin(req, res) {
           ...(avatarUrl ? { avatarUrl } : {}),
           ...(name ? { name } : {}),
         },
+      });
+
+      if (mergeByName) {
+        const targetName = normalizeClientName(updatedClient.name);
+        if (targetName) {
+          const candidates = await tx.client.findMany({
+            where: {
+              accountId: req.user.accountId,
+              deletedAt: null,
+              status: 'ACTIVE',
+              userId: null,
+            },
+            select: { id: true, name: true },
+          });
+
+          const duplicateIds = candidates
+            .filter((candidate) => candidate.id !== updatedClient.id)
+            .filter(
+              (candidate) => normalizeClientName(candidate.name) === targetName,
+            )
+            .map((candidate) => candidate.id);
+
+          if (duplicateIds.length) {
+            await tx.debt.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                clientId: { in: duplicateIds },
+              },
+              data: { clientId: updatedClient.id },
+            });
+
+            await tx.payment.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                clientId: { in: duplicateIds },
+              },
+              data: { clientId: updatedClient.id },
+            });
+
+            await tx.renegotiation.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                clientId: { in: duplicateIds },
+              },
+              data: { clientId: updatedClient.id },
+            });
+
+            await tx.installment.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                clientId: { in: duplicateIds },
+              },
+              data: { clientId: updatedClient.id },
+            });
+
+            await tx.creditRequest.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                clientId: { in: duplicateIds },
+              },
+              data: { clientId: updatedClient.id },
+            });
+
+            await tx.client.updateMany({
+              where: {
+                accountId: req.user.accountId,
+                id: { in: duplicateIds },
+              },
+              data: {
+                status: 'EXCLUDED',
+                deletedAt: new Date(),
+              },
+            });
+          }
+        }
+      }
+
+      const refreshedClient = await tx.client.findFirst({
+        where: { id: updatedClient.id, accountId: req.user.accountId },
         include: baseClientInclude,
       });
 
-      return { user, updatedClient };
+      return { user, updatedClient: refreshedClient || updatedClient };
     });
 
     return res.status(201).json({
@@ -434,6 +525,141 @@ async function createClientLogin(req, res) {
   } catch (err) {
     console.log(err);
     return res.status(500).json({ message: 'Erro ao criar login do cliente', data: {} });
+  }
+}
+
+async function mergeClientDuplicates(req, res) {
+  try {
+    const clientId = Number(req.params.id);
+    const mergeByName = req.body?.mergeByName !== false;
+
+    if (!clientId) {
+      return res.status(400).json({ message: 'ID do cliente invalido', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId,
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
+    }
+
+    const targetName = normalizeClientName(client.name);
+    if (!mergeByName || !targetName) {
+      return res.json({
+        message: 'Nenhum duplicado encontrado',
+        data: {
+          mergedClients: 0,
+          mergedDebts: 0,
+        },
+      });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const candidates = await tx.client.findMany({
+        where: {
+          accountId: req.user.accountId,
+          deletedAt: null,
+          status: 'ACTIVE',
+          userId: null,
+        },
+        select: { id: true, name: true },
+      });
+
+      const duplicateIds = candidates
+        .filter((candidate) => candidate.id !== client.id)
+        .filter((candidate) => normalizeClientName(candidate.name) === targetName)
+        .map((candidate) => candidate.id);
+      if (!duplicateIds.length) {
+        const refreshed = await tx.client.findFirst({
+          where: { id: client.id, accountId: req.user.accountId },
+          include: baseClientInclude,
+        });
+        return { mergedClients: 0, mergedDebts: 0, client: refreshed };
+      }
+
+      const debtUpdate = await tx.debt.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          clientId: { in: duplicateIds },
+        },
+        data: { clientId: client.id },
+      });
+
+      await tx.payment.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          clientId: { in: duplicateIds },
+        },
+        data: { clientId: client.id },
+      });
+
+      await tx.renegotiation.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          clientId: { in: duplicateIds },
+        },
+        data: { clientId: client.id },
+      });
+
+      await tx.installment.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          clientId: { in: duplicateIds },
+        },
+        data: { clientId: client.id },
+      });
+
+      await tx.creditRequest.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          clientId: { in: duplicateIds },
+        },
+        data: { clientId: client.id },
+      });
+
+      await tx.client.updateMany({
+        where: {
+          accountId: req.user.accountId,
+          id: { in: duplicateIds },
+        },
+        data: {
+          status: 'EXCLUDED',
+          deletedAt: new Date(),
+        },
+      });
+
+      const refreshed = await tx.client.findFirst({
+        where: { id: client.id, accountId: req.user.accountId },
+        include: baseClientInclude,
+      });
+
+      return {
+        mergedClients: duplicateIds.length,
+        mergedDebts: debtUpdate.count,
+        client: refreshed,
+      };
+    });
+
+    return res.json({
+      message: 'Duplicados unificados com sucesso',
+      data: {
+        mergedClients: result.mergedClients,
+        mergedDebts: result.mergedDebts,
+        client: result.client ? serializeClient(result.client) : null,
+      },
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao unificar duplicados', data: {} });
   }
 }
 
@@ -717,6 +943,7 @@ module.exports = {
   linkClient,
   createClient,
   createClientLogin,
+  mergeClientDuplicates,
   getClientsSummary,
   getClients,
   getClientById,

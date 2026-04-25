@@ -8,6 +8,7 @@ const {
   linkClient,
   createClient,
   createClientLogin,
+  mergeClientDuplicates,
   getClientsSummary,
   getClients,
   getClientById,
@@ -19,6 +20,7 @@ const {
 
 router.post('/clients', authMiddleware, adminMiddleware, createClient);
 router.post('/clients/:id/create-login', authMiddleware, adminMiddleware, createClientLogin);
+router.post('/clients/:id/merge-duplicates', authMiddleware, adminMiddleware, mergeClientDuplicates);
 router.get('/clients', authMiddleware, adminMiddleware, getClients);
 router.get('/clients/summary', authMiddleware, adminMiddleware, getClientsSummary);
 router.get('/clients/:id', authMiddleware, adminMiddleware, getClientById);
