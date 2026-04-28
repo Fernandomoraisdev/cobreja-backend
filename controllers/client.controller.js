@@ -440,19 +440,36 @@ async function createClientLogin(req, res) {
               accountId: req.user.accountId,
               deletedAt: null,
               status: 'ACTIVE',
-              userId: null,
             },
-            select: { id: true, name: true },
+            select: { id: true, name: true, userId: true },
           });
 
-          const duplicateIds = candidates
+          const duplicates = candidates
             .filter((candidate) => candidate.id !== updatedClient.id)
-            .filter(
-              (candidate) => normalizeClientName(candidate.name) === targetName,
-            )
-            .map((candidate) => candidate.id);
+            .filter((candidate) => normalizeClientName(candidate.name) === targetName);
+
+          const duplicateIds = duplicates.map((candidate) => candidate.id);
+          const duplicateUserIds = duplicates
+            .map((candidate) => candidate.userId)
+            .filter((userId) => userId != null);
 
           if (duplicateIds.length) {
+            if (duplicateUserIds.length) {
+              const linkedUsers = await tx.user.findMany({
+                where: { id: { in: duplicateUserIds } },
+                select: { id: true, role: true },
+              });
+
+              const invalid = linkedUsers.filter((user) => user.role !== 'CLIENT');
+              if (invalid.length) {
+                throw new Error(
+                  `Nao e possivel unificar porque existem perfis vinculados a usuarios nao-CLIENT: ${invalid
+                    .map((user) => user.id)
+                    .join(', ')}`,
+                );
+              }
+            }
+
             await tx.debt.updateMany({
               where: {
                 accountId: req.user.accountId,
@@ -501,6 +518,7 @@ async function createClientLogin(req, res) {
               data: {
                 status: 'EXCLUDED',
                 deletedAt: new Date(),
+                userId: null,
               },
             });
           }
@@ -524,6 +542,10 @@ async function createClientLogin(req, res) {
     });
   } catch (err) {
     console.log(err);
+    const message = err?.message || 'Erro ao criar login do cliente';
+    if (String(message).startsWith('Nao e possivel unificar')) {
+      return res.status(400).json({ message, data: {} });
+    }
     return res.status(500).json({ message: 'Erro ao criar login do cliente', data: {} });
   }
 }
@@ -545,6 +567,7 @@ async function mergeClientDuplicates(req, res) {
       select: {
         id: true,
         name: true,
+        userId: true,
       },
     });
 
@@ -569,21 +592,55 @@ async function mergeClientDuplicates(req, res) {
           accountId: req.user.accountId,
           deletedAt: null,
           status: 'ACTIVE',
-          userId: null,
         },
-        select: { id: true, name: true },
+        select: { id: true, name: true, userId: true },
       });
 
-      const duplicateIds = candidates
+      const duplicates = candidates
         .filter((candidate) => candidate.id !== client.id)
-        .filter((candidate) => normalizeClientName(candidate.name) === targetName)
-        .map((candidate) => candidate.id);
+        .filter((candidate) => normalizeClientName(candidate.name) === targetName);
+
+      const duplicateIds = duplicates.map((candidate) => candidate.id);
       if (!duplicateIds.length) {
         const refreshed = await tx.client.findFirst({
           where: { id: client.id, accountId: req.user.accountId },
           include: baseClientInclude,
         });
         return { mergedClients: 0, mergedDebts: 0, client: refreshed };
+      }
+
+      const linkedUserIds = Array.from(
+        new Set(
+          [client.userId, ...duplicates.map((candidate) => candidate.userId)].filter(
+            (userId) => userId != null,
+          ),
+        ),
+      );
+
+      // Regra de seguranÃ§a: nÃ£o unificamos registros com logins diferentes,
+      // para nÃ£o misturar carteiras de pessoas distintas.
+      if (linkedUserIds.length > 1) {
+        throw new Error(
+          `Nao e possivel unificar porque existem multiplos logins vinculados: ${linkedUserIds.join(
+            ', ',
+          )}`,
+        );
+      }
+
+      if (linkedUserIds.length) {
+        const linkedUsers = await tx.user.findMany({
+          where: { id: { in: linkedUserIds } },
+          select: { id: true, role: true },
+        });
+
+        const invalid = linkedUsers.filter((user) => user.role !== 'CLIENT');
+        if (invalid.length) {
+          throw new Error(
+            `Nao e possivel unificar porque existem perfis vinculados a usuarios nao-CLIENT: ${invalid
+              .map((user) => user.id)
+              .join(', ')}`,
+          );
+        }
       }
 
       const debtUpdate = await tx.debt.updateMany({
@@ -634,8 +691,20 @@ async function mergeClientDuplicates(req, res) {
         data: {
           status: 'EXCLUDED',
           deletedAt: new Date(),
+          // Se algum duplicado tiver login, desconectamos para evitar contas "fantasmas"
+          // apontando para um perfil excluido depois da unificacao.
+          userId: null,
         },
       });
+
+      // Se o login estava no duplicado e o registro-alvo nÃ£o tinha userId, transferimos
+      // o vÃ­nculo para o registro que recebeu as dÃ­vidas.
+      if (!client.userId && linkedUserIds.length === 1) {
+        await tx.client.update({
+          where: { id: client.id },
+          data: { userId: linkedUserIds[0] },
+        });
+      }
 
       const refreshed = await tx.client.findFirst({
         where: { id: client.id, accountId: req.user.accountId },
@@ -645,6 +714,7 @@ async function mergeClientDuplicates(req, res) {
       return {
         mergedClients: duplicateIds.length,
         mergedDebts: debtUpdate.count,
+        detachedUsers: client.userId ? 0 : linkedUserIds.length,
         client: refreshed,
       };
     });
@@ -654,11 +724,16 @@ async function mergeClientDuplicates(req, res) {
       data: {
         mergedClients: result.mergedClients,
         mergedDebts: result.mergedDebts,
+        detachedUsers: result.detachedUsers ?? 0,
         client: result.client ? serializeClient(result.client) : null,
       },
     });
   } catch (err) {
     console.log(err);
+    const message = err?.message || 'Erro ao unificar duplicados';
+    if (String(message).startsWith('Nao e possivel unificar')) {
+      return res.status(400).json({ message, data: {} });
+    }
     return res.status(500).json({ message: 'Erro ao unificar duplicados', data: {} });
   }
 }
