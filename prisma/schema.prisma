@@ -80,6 +80,8 @@ model Account {
   clients        Client[]
   debts          Debt[]
   payments       Payment[]
+  paymentIntents PaymentIntent[]
+  webhookLogs    WebhookLog[]
   renegotiations Renegotiation[]
   installments   Installment[]
 
@@ -109,6 +111,7 @@ model Client {
 
   debts          Debt[]
   payments       Payment[]
+  paymentIntents PaymentIntent[]
   renegotiations Renegotiation[]
   installments   Installment[]
   creditRequests CreditRequest[]
@@ -154,6 +157,7 @@ model Debt {
   childDebts   Debt[]  @relation("DebtOrigin")
 
   payments     Payment[]
+  paymentIntents PaymentIntent[]
   installments Installment[]
 
   createdAt DateTime @default(now())
@@ -218,6 +222,7 @@ model Installment {
   debt        Debt?      @relation(fields: [debtId], references: [id])
 
   payments    Payment[]
+  paymentIntents PaymentIntent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -271,10 +276,75 @@ model Payment {
   accountId       Int
   account         Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
+  paymentIntents  PaymentIntent[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@index([accountId, type])
   @@index([clientId, paidAt])
   @@index([debtId, paidAt])
+}
+
+model PaymentIntent {
+  id                    Int      @id @default(autoincrement())
+  provider              String   @default("MERCADO_PAGO")
+  kind                  String   @default("INSTALLMENT_PIX")
+  status                String   @default("CREATED")
+  amount                Float
+  currency              String   @default("BRL")
+  externalReference     String   @unique
+  idempotencyKey        String   @unique
+  mercadoPagoPaymentId  String?  @unique
+  qrCode                String?
+  qrCodeBase64          String?
+  ticketUrl             String?
+  rawResponse           Json?
+  rawWebhook            Json?
+  paidAt                DateTime?
+  expiresAt             DateTime?
+  lastCheckedAt         DateTime?
+
+  clientId        Int
+  client          Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  debtId          Int
+  debt            Debt         @relation(fields: [debtId], references: [id])
+
+  installmentId   Int
+  installment     Installment  @relation(fields: [installmentId], references: [id])
+
+  paymentId       Int?
+  payment         Payment?     @relation(fields: [paymentId], references: [id])
+
+  accountId       Int
+  account         Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status])
+  @@index([clientId, status])
+  @@index([installmentId, status])
+}
+
+model WebhookLog {
+  id              Int      @id @default(autoincrement())
+  provider        String   @default("MERCADO_PAGO")
+  eventType       String?
+  eventId         String?
+  resourceId      String?
+  signatureValid  Boolean  @default(false)
+  processed       Boolean  @default(false)
+  processingError String?
+  headers         Json?
+  payload         Json?
+
+  accountId       Int?
+  account         Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([provider, resourceId])
+  @@index([processed, createdAt])
 }

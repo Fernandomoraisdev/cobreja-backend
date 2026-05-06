@@ -9,6 +9,7 @@ const clientRoutes = require('./routes/client.routes');
 const debtRoutes = require('./routes/debt.routes');
 const requestRoutes = require('./routes/request.routes');
 const paymentRoutes = require('./routes/payment.routes');
+const mercadoPagoRoutes = require('./routes/mercadopago.routes');
 const renegotiationRoutes = require('./routes/renegotiation.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
@@ -46,6 +47,7 @@ app.use('/api/client', clientRoutes);
 app.use('/api/debt', debtRoutes);
 app.use('/api/request', requestRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/payments/mercadopago', mercadoPagoRoutes);
 app.use('/api/renegotiation', renegotiationRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
