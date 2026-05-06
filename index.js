@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 
 const prisma = require('./prisma');
 const clientRoutes = require('./routes/client.routes');
@@ -24,6 +25,37 @@ function normalizeEmail(value) {
 
 function normalizeCpf(value) {
   return String(value || '').replace(/\D+/g, '');
+}
+
+function normalizeInviteCode(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function buildInviteCode(accountName) {
+  const prefix = normalizeInviteCode(accountName).slice(0, 6) || 'COBREJA';
+  return `${prefix}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+async function ensureAccountInviteCode(accountId) {
+  const account = await prisma.account.findUnique({ where: { id: accountId } });
+  if (!account) return null;
+  if (account.inviteCode) return account;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return await prisma.account.update({
+        where: { id: account.id },
+        data: { inviteCode: buildInviteCode(account.name) },
+      });
+    } catch (error) {
+      if (error?.code !== 'P2002') throw error;
+    }
+  }
+
+  throw new Error('Nao foi possivel gerar codigo de convite');
 }
 
 function sanitizeUser(user) {
@@ -66,6 +98,11 @@ app.get('/me', authMiddleware, async (req, res) => {
     include: { account: true },
   });
 
+  let account = user?.account || null;
+  if (user?.role === 'ADMIN' && account) {
+    account = await ensureAccountInviteCode(account.id);
+  }
+
   const client = await prisma.client.findUnique({
     where: { userId: req.user.id },
     select: {
@@ -86,10 +123,46 @@ app.get('/me', authMiddleware, async (req, res) => {
     message: 'Usuario carregado com sucesso',
     data: {
       user: sanitizeUser(user),
-      account: user?.account || null,
+      account,
       client: client || null,
     },
   });
+});
+
+app.get('/invite/:code', async (req, res) => {
+  try {
+    const inviteCode = normalizeInviteCode(req.params.code);
+    if (!inviteCode) {
+      return res.status(400).json({ message: 'Codigo de convite invalido', data: {} });
+    }
+
+    const account = await prisma.account.findUnique({
+      where: { inviteCode },
+      include: {
+        users: {
+          where: { role: 'ADMIN' },
+          select: { name: true },
+          take: 1,
+        },
+      },
+    });
+
+    if (!account) {
+      return res.status(404).json({ message: 'Convite nao encontrado', data: {} });
+    }
+
+    return res.json({
+      message: 'Convite encontrado',
+      data: {
+        inviteCode: account.inviteCode,
+        accountName: account.name,
+        adminName: account.users[0]?.name || account.name,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Erro ao carregar convite', data: {} });
+  }
 });
 
 app.get('/my-debts', authMiddleware, getMyDebts);
@@ -224,6 +297,7 @@ app.post('/client-register', async (req, res) => {
     const phone = String(req.body.phone || '').trim() || null;
     const address = String(req.body.address || '').trim() || null;
     const requestedAccountId = req.body.accountId ? Number(req.body.accountId) : null;
+    const inviteCode = normalizeInviteCode(req.body.inviteCode || req.body.convite);
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -258,10 +332,25 @@ app.post('/client-register', async (req, res) => {
     let accountId = requestedAccountId;
     let client = null;
 
+    if (!accountId && inviteCode) {
+      const inviteAccount = await prisma.account.findUnique({
+        where: { inviteCode },
+      });
+
+      if (!inviteAccount) {
+        return res.status(400).json({
+          message: 'Codigo de convite invalido. Confira o link enviado pelo administrador.',
+          data: {},
+        });
+      }
+
+      accountId = inviteAccount.id;
+    }
+
     const matchingClients = await prisma.client.findMany({
       where: {
         status: 'ACTIVE',
-        ...(requestedAccountId ? { accountId: requestedAccountId } : {}),
+        ...(accountId ? { accountId } : {}),
         OR: [
           ...(cpf ? [{ cpf }] : []),
           ...(email ? [{ email }] : []),
@@ -289,24 +378,8 @@ app.post('/client-register', async (req, res) => {
     }
 
     if (!accountId) {
-      const defaultAdminAccount = await prisma.account.findFirst({
-        where: {
-          users: {
-            some: { role: 'ADMIN' },
-          },
-        },
-        select: { id: true },
-        orderBy: { createdAt: 'asc' },
-      });
-
-      if (defaultAdminAccount) {
-        accountId = defaultAdminAccount.id;
-      }
-    }
-
-    if (!accountId) {
       return res.status(400).json({
-        message: 'Nao foi possivel identificar a conta do administrador. Peça ao administrador para cadastrar voce primeiro.',
+        message: 'Informe o codigo de convite enviado pelo administrador para criar sua conta.',
         data: {},
       });
     }

@@ -76,6 +76,7 @@ model User {
 model Account {
   id             Int             @id @default(autoincrement())
   name           String
+  inviteCode     String?         @unique
   users          User[]
   clients        Client[]
   debts          Debt[]
