@@ -289,18 +289,18 @@ app.post('/client-register', async (req, res) => {
     }
 
     if (!accountId) {
-      const accounts = await prisma.account.findMany({
+      const defaultAdminAccount = await prisma.account.findFirst({
         where: {
           users: {
             some: { role: 'ADMIN' },
           },
         },
         select: { id: true },
-        take: 2,
+        orderBy: { createdAt: 'asc' },
       });
 
-      if (accounts.length === 1) {
-        accountId = accounts[0].id;
+      if (defaultAdminAccount) {
+        accountId = defaultAdminAccount.id;
       }
     }
 
