@@ -223,6 +223,15 @@ app.post('/login', async (req, res) => {
 
 app.post('/register', async (req, res) => {
   try {
+    const adminSignupCode = String(process.env.ADMIN_SIGNUP_CODE || '').trim();
+    const providedSignupCode = String(req.body.adminSignupCode || '').trim();
+    if (!adminSignupCode || providedSignupCode !== adminSignupCode) {
+      return res.status(403).json({
+        message: 'Cadastro de administrador nao esta liberado publicamente.',
+        data: {},
+      });
+    }
+
     const name = String(req.body.name || '').trim();
     const email = normalizeEmail(req.body.email);
     const cpf = normalizeCpf(req.body.cpf);
