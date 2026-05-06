@@ -230,6 +230,12 @@ model CreditRequest {
   id          Int      @id @default(autoincrement())
   amount      Float
   description String?
+  desiredTermDays Int?
+  requestedInstallments Int?
+  decisionNote String?
+  reviewedAt DateTime?
+  approvedDebtId Int?
+  approvedRenegotiationId Int?
   type        String
   status      String   @default("PENDING")
 

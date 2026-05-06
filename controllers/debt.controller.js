@@ -58,6 +58,11 @@ async function getMyDebts(req, res) {
         accountId: req.user.accountId,
         deletedAt: null,
       },
+      include: {
+        installments: {
+          orderBy: { installmentNumber: 'asc' },
+        },
+      },
       orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
     });
 

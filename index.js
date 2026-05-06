@@ -213,6 +213,193 @@ app.post('/register', async (req, res) => {
   }
 });
 
+app.post('/client-register', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const email = normalizeEmail(req.body.email);
+    const cpf = normalizeCpf(req.body.cpf);
+    const password = String(req.body.password || '');
+    const phone = String(req.body.phone || '').trim() || null;
+    const address = String(req.body.address || '').trim() || null;
+    const requestedAccountId = req.body.accountId ? Number(req.body.accountId) : null;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: 'Nome, email e senha sao obrigatorios',
+        data: {},
+      });
+    }
+
+    if (!cpf && !email) {
+      return res.status(400).json({
+        message: 'Informe CPF ou email para criar a conta de cliente',
+        data: {},
+      });
+    }
+
+    const duplicatedUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email },
+          ...(cpf ? [{ cpf }] : []),
+        ],
+      },
+    });
+
+    if (duplicatedUser) {
+      return res.status(400).json({
+        message: 'Ja existe um usuario com este email ou CPF',
+        data: {},
+      });
+    }
+
+    let accountId = requestedAccountId;
+    let client = null;
+
+    const matchingClients = await prisma.client.findMany({
+      where: {
+        status: 'ACTIVE',
+        ...(requestedAccountId ? { accountId: requestedAccountId } : {}),
+        OR: [
+          ...(cpf ? [{ cpf }] : []),
+          ...(email ? [{ email }] : []),
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (matchingClients.length > 1 && !requestedAccountId) {
+      return res.status(409).json({
+        message: 'Encontramos mais de um cadastro com estes dados. Fale com o administrador para liberar seu acesso.',
+        data: {},
+      });
+    }
+
+    if (matchingClients.length) {
+      client = matchingClients[0];
+      accountId = client.accountId;
+      if (client.userId) {
+        return res.status(400).json({
+          message: 'Este cliente ja possui acesso ao sistema',
+          data: {},
+        });
+      }
+    }
+
+    if (!accountId) {
+      const accounts = await prisma.account.findMany({
+        where: {
+          users: {
+            some: { role: 'ADMIN' },
+          },
+        },
+        select: { id: true },
+        take: 2,
+      });
+
+      if (accounts.length === 1) {
+        accountId = accounts[0].id;
+      }
+    }
+
+    if (!accountId) {
+      return res.status(400).json({
+        message: 'Nao foi possivel identificar a conta do administrador. Peça ao administrador para cadastrar voce primeiro.',
+        data: {},
+      });
+    }
+
+    const account = await prisma.account.findUnique({
+      where: { id: accountId },
+    });
+
+    if (!account) {
+      return res.status(404).json({
+        message: 'Conta do administrador nao encontrada',
+        data: {},
+      });
+    }
+
+    const duplicatedClient = await prisma.client.findFirst({
+      where: {
+        accountId,
+        OR: [
+          ...(cpf ? [{ cpf }] : []),
+          ...(email ? [{ email }] : []),
+        ],
+        ...(client ? { id: { not: client.id } } : {}),
+      },
+    });
+
+    if (duplicatedClient) {
+      return res.status(400).json({
+        message: 'Ja existe outro cliente com este CPF ou email nesta conta',
+        data: {},
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          name,
+          email,
+          cpf: cpf || null,
+          password: hashedPassword,
+          phone,
+          role: 'CLIENT',
+          accountId,
+        },
+      });
+
+      const linkedClient = client
+        ? await tx.client.update({
+            where: { id: client.id },
+            data: {
+              userId: user.id,
+              name,
+              email,
+              cpf: cpf || client.cpf,
+              phone,
+              address,
+            },
+          })
+        : await tx.client.create({
+            data: {
+              name,
+              email,
+              cpf: cpf || null,
+              phone,
+              address,
+              status: 'ACTIVE',
+              userId: user.id,
+              accountId,
+            },
+          });
+
+      return { user, client: linkedClient };
+    });
+
+    const token = signAuthToken(result.user);
+
+    return res.status(201).json({
+      message: 'Conta de cliente criada com sucesso',
+      data: {
+        token,
+        user: sanitizeUser(result.user),
+        client: result.client,
+        account,
+      },
+      token,
+      user: sanitizeUser(result.user),
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Erro ao criar conta de cliente', data: {} });
+  }
+});
+
 app.get('/', (req, res) => {
   res.send('Backend Cobreja rodando');
 });
