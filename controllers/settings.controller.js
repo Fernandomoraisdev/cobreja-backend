@@ -88,6 +88,7 @@ function defaultSettings(account) {
     },
     whatsapp: {
       connectionStatus: 'NOT_CONNECTED',
+      adminPhone: null,
       qrCode: null,
       templates: DEFAULT_WHATSAPP_TEMPLATES,
       billingAutomationEnabled: false,

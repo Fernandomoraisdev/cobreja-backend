@@ -1,6 +1,17 @@
 const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
 
+function onlyDigits(value) {
+  return String(value || '').replace(/\D+/g, '');
+}
+
+function buildWhatsAppLink(phone, message) {
+  const digits = onlyDigits(phone);
+  if (!digits) return null;
+  const normalized = digits.startsWith('55') ? digits : `55${digits}`;
+  return `https://wa.me/${normalized}?text=${encodeURIComponent(message)}`;
+}
+
 async function resolveClientForUser(req) {
   if (req.user.role !== 'CLIENT') return null;
   return prisma.client.findFirst({
@@ -11,13 +22,62 @@ async function resolveClientForUser(req) {
   });
 }
 
-function serializeConversation(conversation) {
+function latestMessage(conversation) {
+  const messages = conversation.messages || [];
+  if (!messages.length) return null;
+  return [...messages].sort(
+    (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+  )[0];
+}
+
+function buildAdminSupportNotification({ conversation, message, settings }) {
+  const clientName = conversation.client?.name || 'Cliente';
+  const subject = conversation.subject || 'Suporte';
+  const companyName = settings?.company?.name || 'COBREJA';
+  const adminPhone =
+    settings?.whatsapp?.adminPhone ||
+    settings?.company?.phone ||
+    settings?.admin?.phone ||
+    null;
+  const text = [
+    `${companyName} - novo atendimento`,
+    `Cliente: ${clientName}`,
+    `Assunto: ${subject}`,
+    `Mensagem: ${message?.body || 'Sem mensagem'}`,
+  ].join('\n');
+
+  return {
+    message: text,
+    whatsappLink: buildWhatsAppLink(adminPhone, text),
+    phoneConfigured: Boolean(onlyDigits(adminPhone)),
+  };
+}
+
+function serializeConversation(conversation, settings = null) {
+  const lastMessage = latestMessage(conversation);
+  const needsAdminReply =
+    ['OPEN', 'PENDING'].includes(String(conversation.status || '').toUpperCase()) &&
+    lastMessage?.direction === 'INBOUND';
+
   return {
     id: conversation.id,
     subject: conversation.subject,
     status: conversation.status,
     priority: conversation.priority,
     lastMessageAt: conversation.lastMessageAt,
+    lastMessage: lastMessage
+      ? {
+          id: lastMessage.id,
+          body: lastMessage.body,
+          direction: lastMessage.direction,
+          channel: lastMessage.channel,
+          createdAt: lastMessage.createdAt,
+        }
+      : null,
+    needsAdminReply,
+    adminNotification: needsAdminReply
+      ? buildAdminSupportNotification({ conversation, message: lastMessage, settings })
+      : null,
     client: conversation.client
       ? {
           id: conversation.client.id,
@@ -48,7 +108,8 @@ async function listConversations(req, res) {
     return res.status(404).json({ message: 'Cliente nao encontrado', data: [] });
   }
 
-  const conversations = await prisma.supportConversation.findMany({
+  const [conversations, settings] = await Promise.all([
+    prisma.supportConversation.findMany({
     where: {
       accountId,
       ...(req.user.role === 'CLIENT' ? { clientId: client.id } : {}),
@@ -58,11 +119,16 @@ async function listConversations(req, res) {
       messages: { orderBy: { createdAt: 'asc' }, take: 50 },
     },
     orderBy: { lastMessageAt: 'desc' },
-  });
+    }),
+    prisma.accountSettings.findUnique({
+      where: { accountId },
+      select: { company: true, admin: true, whatsapp: true },
+    }),
+  ]);
 
   return res.json({
     message: 'Conversas carregadas',
-    data: conversations.map(serializeConversation),
+    data: conversations.map((conversation) => serializeConversation(conversation, settings)),
   });
 }
 
@@ -95,6 +161,11 @@ async function createConversation(req, res) {
     }
   }
 
+  const settings = await prisma.accountSettings.findUnique({
+    where: { accountId },
+    select: { company: true, admin: true, whatsapp: true },
+  });
+
   const conversation = await prisma.supportConversation.create({
     data: {
       subject,
@@ -123,12 +194,23 @@ async function createConversation(req, res) {
     action: 'SUPPORT_CONVERSATION_CREATED',
     entity: 'SupportConversation',
     entityId: conversation.id,
-    metadata: { subject, role: req.user.role },
+    metadata: {
+      subject,
+      role: req.user.role,
+      notifyAdmin: req.user.role === 'CLIENT',
+      adminNotification: req.user.role === 'CLIENT'
+        ? buildAdminSupportNotification({
+            conversation,
+            message: latestMessage(conversation),
+            settings,
+          })
+        : null,
+    },
   });
 
   return res.status(201).json({
     message: 'Conversa de suporte criada',
-    data: serializeConversation(conversation),
+    data: serializeConversation(conversation, settings),
   });
 }
 
@@ -145,13 +227,20 @@ async function addMessage(req, res) {
   }
 
   const client = await resolveClientForUser(req);
-  const conversation = await prisma.supportConversation.findFirst({
+  const [conversation, settings] = await Promise.all([
+    prisma.supportConversation.findFirst({
     where: {
       id: conversationId,
       accountId,
       ...(req.user.role === 'CLIENT' ? { clientId: client?.id || 0 } : {}),
     },
-  });
+    include: { client: true },
+    }),
+    prisma.accountSettings.findUnique({
+      where: { accountId },
+      select: { company: true, admin: true, whatsapp: true },
+    }),
+  ]);
 
   if (!conversation) {
     return res.status(404).json({ message: 'Conversa nao encontrada', data: {} });
@@ -182,7 +271,14 @@ async function addMessage(req, res) {
     action: 'SUPPORT_MESSAGE_SENT',
     entity: 'SupportConversation',
     entityId: conversationId,
-    metadata: { role: req.user.role, channel: 'IN_APP' },
+    metadata: {
+      role: req.user.role,
+      channel: 'IN_APP',
+      notifyAdmin: req.user.role === 'CLIENT',
+      adminNotification: req.user.role === 'CLIENT'
+        ? buildAdminSupportNotification({ conversation, message, settings })
+        : null,
+    },
   });
 
   return res.status(201).json({
