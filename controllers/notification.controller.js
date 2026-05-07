@@ -42,6 +42,7 @@ async function getNotificationSummary(req, res) {
     const tomorrowEnd = endOfDay(addDays(today, 1));
 
     const [
+      settings,
       supportConversations,
       creditPending,
       overdueInstallments,
@@ -51,6 +52,10 @@ async function getNotificationSummary(req, res) {
       pixApprovedToday,
       invalidWebhookLogs,
     ] = await Promise.all([
+      prisma.accountSettings.findUnique({
+        where: { accountId },
+        select: { notifications: true },
+      }),
       prisma.supportConversation.findMany({
         where: {
           accountId,
@@ -109,9 +114,16 @@ async function getNotificationSummary(req, res) {
       const latest = conversation.messages?.[0];
       return latest?.direction === 'INBOUND' && !latest.readAt;
     }).length;
+    const notificationSettings = settings?.notifications || {};
+    const enabled = {
+      billing: notificationSettings.billing !== false,
+      support: notificationSettings.support !== false,
+      pix: notificationSettings.pix !== false,
+      credit: notificationSettings.credit !== false,
+    };
 
     const items = [];
-    if (supportPending > 0) {
+    if (enabled.support && supportPending > 0) {
       items.push(notification({
         type: 'SUPPORT_PENDING',
         severity: 'WARNING',
@@ -121,7 +133,7 @@ async function getNotificationSummary(req, res) {
         action: 'SUPPORT',
       }));
     }
-    if (creditPending > 0) {
+    if (enabled.credit && creditPending > 0) {
       items.push(notification({
         type: 'CREDIT_PENDING',
         severity: 'WARNING',
@@ -131,7 +143,7 @@ async function getNotificationSummary(req, res) {
         action: 'CREDIT_REQUESTS',
       }));
     }
-    if (overdueInstallments > 0) {
+    if (enabled.billing && overdueInstallments > 0) {
       items.push(notification({
         type: 'INSTALLMENTS_OVERDUE',
         severity: 'ERROR',
@@ -141,7 +153,7 @@ async function getNotificationSummary(req, res) {
         action: 'COLLECTIONS',
       }));
     }
-    if (dueTodayInstallments > 0) {
+    if (enabled.billing && dueTodayInstallments > 0) {
       items.push(notification({
         type: 'INSTALLMENTS_DUE_TODAY',
         severity: 'INFO',
@@ -151,7 +163,7 @@ async function getNotificationSummary(req, res) {
         action: 'COLLECTIONS',
       }));
     }
-    if (dueTomorrowInstallments > 0) {
+    if (enabled.billing && dueTomorrowInstallments > 0) {
       items.push(notification({
         type: 'INSTALLMENTS_DUE_TOMORROW',
         severity: 'INFO',
@@ -161,7 +173,7 @@ async function getNotificationSummary(req, res) {
         action: 'COLLECTIONS',
       }));
     }
-    if (pixPending > 0) {
+    if (enabled.pix && pixPending > 0) {
       items.push(notification({
         type: 'PIX_PENDING',
         severity: 'INFO',
@@ -171,7 +183,7 @@ async function getNotificationSummary(req, res) {
         action: 'MERCADO_PAGO',
       }));
     }
-    if (pixApprovedToday > 0) {
+    if (enabled.pix && pixApprovedToday > 0) {
       items.push(notification({
         type: 'PIX_APPROVED_TODAY',
         severity: 'SUCCESS',
@@ -181,7 +193,7 @@ async function getNotificationSummary(req, res) {
         action: 'MERCADO_PAGO',
       }));
     }
-    if (invalidWebhookLogs > 0) {
+    if (enabled.pix && invalidWebhookLogs > 0) {
       items.push(notification({
         type: 'WEBHOOK_INVALID',
         severity: 'ERROR',
@@ -196,6 +208,7 @@ async function getNotificationSummary(req, res) {
       message: 'Notificacoes carregadas',
       data: {
         generatedAt: today,
+        enabled,
         unreadCount: items.reduce((sum, item) => sum + Number(item.count || 0), 0),
         items,
       },

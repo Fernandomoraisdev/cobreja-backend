@@ -110,6 +110,9 @@ function defaultSettings(account) {
       whatsapp: true,
       push: false,
       billing: true,
+      support: true,
+      pix: true,
+      credit: true,
     },
     security: {
       requireDoubleConfirmation: true,
