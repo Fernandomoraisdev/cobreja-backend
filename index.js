@@ -19,6 +19,7 @@ const collectionRoutes = require('./routes/collection.routes');
 const saasRoutes = require('./routes/saas.routes');
 const securityRoutes = require('./routes/security.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
+const notificationRoutes = require('./routes/notification.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
 const { getMyDebts } = require('./controllers/debt.controller');
@@ -96,6 +97,7 @@ app.use('/api/collections', collectionRoutes);
 app.use('/api/saas', saasRoutes);
 app.use('/api/security', securityRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
   res.json({
