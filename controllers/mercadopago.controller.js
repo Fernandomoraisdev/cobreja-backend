@@ -47,6 +47,44 @@ function serializeIntent(intent) {
   };
 }
 
+function startOfDay(date = new Date()) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function daysUntil(date, from = new Date()) {
+  const due = startOfDay(date).getTime();
+  const today = startOfDay(from).getTime();
+  return Math.max(Math.ceil((due - today) / 86400000), 0);
+}
+
+function buildAnticipationQuote(installment) {
+  const remaining = roundMoney(
+    Math.max(Number(installment.amount || 0) - Number(installment.paidAmount || 0), 0),
+  );
+  const earlyDays = daysUntil(installment.dueDate);
+  const dailyDiscountRate = Number(process.env.ANTICIPATION_DAILY_DISCOUNT_RATE || 0.0015);
+  const maxDiscountRate = Number(process.env.ANTICIPATION_MAX_DISCOUNT_RATE || 0.30);
+  const discountRate = earlyDays > 0
+    ? Math.min(Math.max(dailyDiscountRate, 0) * earlyDays, Math.max(maxDiscountRate, 0))
+    : 0;
+  const discountAmount = roundMoney(remaining * discountRate);
+  const anticipatedAmount = roundMoney(Math.max(remaining - discountAmount, 0.01));
+
+  return {
+    originalAmount: remaining,
+    anticipatedAmount,
+    discountAmount,
+    discountRate,
+    earlyDays,
+    dueDate: installment.dueDate,
+    installmentId: installment.id,
+    installmentNumber: installment.installmentNumber,
+    available: remaining > MONEY_EPSILON && earlyDays > 0 && installment.status !== 'PAID',
+  };
+}
+
 function buildMercadoPagoWebhookUrl() {
   const baseUrl = String(process.env.BACKEND_PUBLIC_URL || '').replace(/\/+$/, '');
   if (!baseUrl) return null;
@@ -267,7 +305,7 @@ async function applyApprovedPayment(paymentData, { rawWebhook } = {}) {
       throw new Error('INSTALLMENT_NOT_FOUND');
     }
 
-    const remaining = roundMoney(
+    let remaining = roundMoney(
       Math.max(Number(installment.amount || 0) - Number(installment.paidAmount || 0), 0),
     );
 
@@ -286,6 +324,20 @@ async function applyApprovedPayment(paymentData, { rawWebhook } = {}) {
       return { alreadyApplied: true, paymentId: updatedIntent.paymentId };
     }
 
+    if (lockedIntent.kind === 'INSTALLMENT_ANTICIPATION_PIX') {
+      remaining = roundMoney(Number(lockedIntent.amount || remaining));
+      await tx.installment.update({
+        where: { id: installment.id },
+        data: {
+          amount: remaining,
+          note: [
+            installment.note,
+            'Parcela antecipada com desconto via Pix Mercado Pago.',
+          ].filter(Boolean).join('\n'),
+        },
+      });
+    }
+
     const amount = roundMoney(Math.min(Number(lockedIntent.amount || remaining), remaining));
 
     const payment = await tx.payment.create({
@@ -297,7 +349,9 @@ async function applyApprovedPayment(paymentData, { rawWebhook } = {}) {
         installmentId: lockedIntent.installmentId,
         accountId: lockedIntent.accountId,
         paidAt,
-        note: `Pagamento Pix Mercado Pago ${mercadoPagoPaymentId}`,
+        note: lockedIntent.kind === 'INSTALLMENT_ANTICIPATION_PIX'
+          ? `Antecipacao Pix Mercado Pago ${mercadoPagoPaymentId}`
+          : `Pagamento Pix Mercado Pago ${mercadoPagoPaymentId}`,
       },
     });
 
@@ -438,6 +492,185 @@ async function createInstallmentPix(req, res) {
     console.error('Erro ao criar Pix Mercado Pago:', err);
     return res.status(err.statusCode || 500).json({
       message: err.message || 'Erro ao criar cobranca Pix',
+      data: err.response || {},
+    });
+  }
+}
+
+async function getInstallmentAnticipationQuote(req, res) {
+  try {
+    if (req.user.role !== 'CLIENT') {
+      return res.status(403).json({ message: 'Apenas CLIENT pode antecipar parcela propria', data: {} });
+    }
+
+    const installmentId = Number(req.params.installmentId || req.body.installmentId);
+    if (!installmentId) {
+      return res.status(400).json({ message: 'installmentId e obrigatorio', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: { userId: req.user.id, accountId: req.user.accountId },
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
+    }
+
+    const installment = await prisma.installment.findFirst({
+      where: {
+        id: installmentId,
+        accountId: req.user.accountId,
+        clientId: client.id,
+      },
+      include: { debt: true },
+    });
+
+    if (!installment || !installment.debt) {
+      return res.status(404).json({ message: 'Parcela nao encontrada', data: {} });
+    }
+
+    const quote = buildAnticipationQuote(installment);
+    if (!quote.available) {
+      return res.status(400).json({
+        message: quote.earlyDays <= 0
+          ? 'Antecipacao disponivel apenas para parcelas futuras'
+          : 'Esta parcela nao esta disponivel para antecipacao',
+        data: quote,
+      });
+    }
+
+    return res.json({
+      message: 'Cotacao de antecipacao carregada',
+      data: quote,
+    });
+  } catch (err) {
+    console.error('Erro ao cotar antecipacao:', err);
+    return res.status(500).json({
+      message: err.message || 'Erro ao cotar antecipacao',
+      data: {},
+    });
+  }
+}
+
+async function createInstallmentAnticipationPix(req, res) {
+  try {
+    if (req.user.role !== 'CLIENT') {
+      return res.status(403).json({ message: 'Apenas CLIENT pode antecipar parcela propria', data: {} });
+    }
+
+    const installmentId = Number(req.params.installmentId || req.body.installmentId);
+    if (!installmentId) {
+      return res.status(400).json({ message: 'installmentId e obrigatorio', data: {} });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        userId: req.user.id,
+        accountId: req.user.accountId,
+      },
+      include: { user: true },
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
+    }
+
+    const installment = await prisma.installment.findFirst({
+      where: {
+        id: installmentId,
+        accountId: req.user.accountId,
+        clientId: client.id,
+      },
+      include: { debt: true },
+    });
+
+    if (!installment || !installment.debt) {
+      return res.status(404).json({ message: 'Parcela nao encontrada', data: {} });
+    }
+
+    const quote = buildAnticipationQuote(installment);
+    if (!quote.available) {
+      return res.status(400).json({
+        message: quote.earlyDays <= 0
+          ? 'Antecipacao disponivel apenas para parcelas futuras'
+          : 'Esta parcela nao esta disponivel para antecipacao',
+        data: quote,
+      });
+    }
+
+    const existingIntent = await prisma.paymentIntent.findFirst({
+      where: {
+        installmentId: installment.id,
+        clientId: client.id,
+        accountId: req.user.accountId,
+        provider: 'MERCADO_PAGO',
+        kind: 'INSTALLMENT_ANTICIPATION_PIX',
+        status: { in: ['CREATED', 'PENDING', 'IN_PROCESS'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingIntent?.qrCode) {
+      return res.json({
+        message: 'Cobranca Pix de antecipacao ja existente',
+        data: serializeIntent(existingIntent),
+      });
+    }
+
+    const externalReference = `cobreja:anticipation:${installment.id}:${Date.now()}`;
+    const idempotencyKey = `anticipation-${installment.id}-${Date.now()}`;
+    const { firstName, lastName } = splitName(client.name);
+    const payerEmail = client.email || client.user?.email || `cliente-${client.id}@cobreja.local`;
+
+    const mpPayment = await createPixPayment({
+      amount: quote.anticipatedAmount,
+      description: `COBREJA - Antecipacao parcela ${installment.installmentNumber}`,
+      externalReference,
+      idempotencyKey,
+      payer: {
+        email: payerEmail,
+        firstName,
+        lastName,
+        cpf: onlyDigits(client.cpf || client.user?.cpf),
+      },
+    });
+
+    const transactionData = mpPayment?.point_of_interaction?.transaction_data || {};
+    const intent = await prisma.paymentIntent.create({
+      data: {
+        provider: 'MERCADO_PAGO',
+        kind: 'INSTALLMENT_ANTICIPATION_PIX',
+        status: mapPaymentStatus(mpPayment.status),
+        amount: quote.anticipatedAmount,
+        currency: 'BRL',
+        externalReference,
+        idempotencyKey,
+        mercadoPagoPaymentId: mpPayment.id ? String(mpPayment.id) : null,
+        qrCode: transactionData.qr_code || null,
+        qrCodeBase64: transactionData.qr_code_base64 || null,
+        ticketUrl: transactionData.ticket_url || null,
+        rawResponse: {
+          ...mpPayment,
+          anticipationQuote: quote,
+        },
+        clientId: client.id,
+        debtId: installment.debtId,
+        installmentId: installment.id,
+        accountId: req.user.accountId,
+      },
+    });
+
+    return res.status(201).json({
+      message: 'Pix de antecipacao criado com sucesso',
+      data: {
+        ...serializeIntent(intent),
+        anticipationQuote: quote,
+      },
+    });
+  } catch (err) {
+    console.error('Erro ao criar Pix de antecipacao:', err);
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Erro ao criar Pix de antecipacao',
       data: err.response || {},
     });
   }
@@ -735,7 +968,9 @@ async function mercadoPagoWebhook(req, res) {
 
 module.exports = {
   createInstallmentPix,
+  createInstallmentAnticipationPix,
   getAdminMercadoPagoSummary,
+  getInstallmentAnticipationQuote,
   getPixIntentStatus,
   mercadoPagoWebhook,
 };
