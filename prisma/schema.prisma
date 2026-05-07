@@ -68,6 +68,9 @@ model User {
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   client    Client?
+  auditLogs AuditLog[]
+  openedSupportConversations SupportConversation[] @relation("SupportOpenedBy")
+  supportMessages SupportMessage[] @relation("SupportSender")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -77,6 +80,11 @@ model Account {
   id             Int             @id @default(autoincrement())
   name           String
   inviteCode     String?         @unique
+  settings       AccountSettings?
+  subscriptions  Subscription[]
+  auditLogs      AuditLog[]
+  supportConversations SupportConversation[]
+  supportMessages SupportMessage[]
   users          User[]
   clients        Client[]
   debts          Debt[]
@@ -90,6 +98,139 @@ model Account {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+}
+
+model AccountSettings {
+  id              Int      @id @default(autoincrement())
+  company         Json     @default("{}")
+  admin           Json     @default("{}")
+  finance         Json     @default("{}")
+  mercadoPago     Json     @default("{}")
+  whatsapp        Json     @default("{}")
+  saas            Json     @default("{}")
+  appearance      Json     @default("{}")
+  notifications   Json     @default("{}")
+  security        Json     @default("{}")
+  automation      Json     @default("{}")
+
+  accountId       Int      @unique
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+}
+
+model Plan {
+  id              Int      @id @default(autoincrement())
+  code            String   @unique
+  name            String
+  description     String?
+  priceCents      Int      @default(0)
+  currency        String   @default("BRL")
+  clientLimit     Int?
+  features        Json     @default("[]")
+  isActive        Boolean  @default(true)
+
+  subscriptions   Subscription[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+}
+
+model Subscription {
+  id              Int      @id @default(autoincrement())
+  status          String   @default("TRIAL")
+  trialEndsAt     DateTime?
+  currentPeriodEnd DateTime?
+  externalProvider String?
+  externalId      String?
+
+  planId          Int
+  plan            Plan     @relation(fields: [planId], references: [id])
+
+  accountId       Int
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status])
+}
+
+model AuditLog {
+  id              Int      @id @default(autoincrement())
+  action          String
+  entity          String?
+  entityId        String?
+  severity        String   @default("INFO")
+  metadata        Json     @default("{}")
+  ip              String?
+  userAgent       String?
+
+  accountId       Int
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  userId          Int?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([accountId, action])
+}
+
+model SupportConversation {
+  id              Int      @id @default(autoincrement())
+  subject         String?
+  status          String   @default("OPEN")
+  priority        String   @default("NORMAL")
+  lastMessageAt   DateTime @default(now())
+
+  accountId       Int
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  clientId        Int?
+  client          Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  openedByUserId  Int?
+  openedByUser    User?    @relation("SupportOpenedBy", fields: [openedByUserId], references: [id], onDelete: SetNull)
+
+  messages        SupportMessage[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status, lastMessageAt])
+  @@index([clientId, status])
+}
+
+model SupportMessage {
+  id              Int      @id @default(autoincrement())
+  body            String
+  direction       String   @default("INTERNAL")
+  channel         String   @default("IN_APP")
+  attachmentUrl   String?
+  deliveredAt     DateTime?
+  readAt          DateTime?
+  whatsappMessageId String?
+  metadata        Json     @default("{}")
+
+  conversationId  Int
+  conversation    SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  accountId       Int
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  senderUserId    Int?
+  senderUser      User?    @relation("SupportSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  clientId        Int?
+  client          Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([conversationId, createdAt])
 }
 
 model Client {
@@ -116,6 +257,8 @@ model Client {
   renegotiations Renegotiation[]
   installments   Installment[]
   creditRequests CreditRequest[]
+  supportConversations SupportConversation[]
+  supportMessages SupportMessage[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
