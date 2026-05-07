@@ -1,6 +1,7 @@
 const prisma = require('../prisma');
 const { enrichDebt, roundMoney } = require('../services/debt.service');
 const { buildDashboardSummary } = require('../services/dashboard.service');
+const { enforceClientLimit } = require('../services/saas.service');
 const bcrypt = require('bcrypt');
 
 const baseClientInclude = {
@@ -298,6 +299,8 @@ async function createClient(req, res) {
       return res.status(400).json({ message: duplicatedMessage, data: {} });
     }
 
+    await enforceClientLimit(req.user.accountId);
+
     const client = await prisma.client.create({
       data: {
         name,
@@ -320,7 +323,9 @@ async function createClient(req, res) {
     });
   } catch (err) {
     console.log(err);
-    return res.status(500).json({ message: 'Erro ao criar cliente', data: {} });
+    return res
+      .status(err.statusCode || 500)
+      .json({ message: err.message || 'Erro ao criar cliente', data: err.data || {} });
   }
 }
 
@@ -929,6 +934,10 @@ async function restoreClient(req, res) {
       return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
     }
 
+    if (client.status !== 'ACTIVE') {
+      await enforceClientLimit(req.user.accountId);
+    }
+
     const restoredClient = await prisma.client.update({
       where: { id: clientId },
       data: {
@@ -944,7 +953,9 @@ async function restoreClient(req, res) {
     });
   } catch (err) {
     console.log(err);
-    return res.status(500).json({ message: 'Erro ao restaurar cliente', data: {} });
+    return res
+      .status(err.statusCode || 500)
+      .json({ message: err.message || 'Erro ao restaurar cliente', data: err.data || {} });
   }
 }
 

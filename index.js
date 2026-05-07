@@ -16,10 +16,12 @@ const settingsRoutes = require('./routes/settings.routes');
 const supportRoutes = require('./routes/support.routes');
 const auditRoutes = require('./routes/audit.routes');
 const collectionRoutes = require('./routes/collection.routes');
+const saasRoutes = require('./routes/saas.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
 const { getMyDebts } = require('./controllers/debt.controller');
 const { getMyPayments } = require('./controllers/payment.controller');
+const { enforceClientLimit } = require('./services/saas.service');
 
 const app = express();
 
@@ -89,6 +91,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/collections', collectionRoutes);
+app.use('/api/saas', saasRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
   res.json({
@@ -430,6 +433,10 @@ app.post('/client-register', async (req, res) => {
       });
     }
 
+    if (!client) {
+      await enforceClientLimit(accountId);
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await prisma.$transaction(async (tx) => {
@@ -488,7 +495,9 @@ app.post('/client-register', async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: 'Erro ao criar conta de cliente', data: {} });
+    return res
+      .status(error.statusCode || 500)
+      .json({ message: error.message || 'Erro ao criar conta de cliente', data: error.data || {} });
   }
 });
 
