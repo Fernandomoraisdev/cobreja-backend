@@ -17,6 +17,7 @@ const supportRoutes = require('./routes/support.routes');
 const auditRoutes = require('./routes/audit.routes');
 const collectionRoutes = require('./routes/collection.routes');
 const saasRoutes = require('./routes/saas.routes');
+const securityRoutes = require('./routes/security.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
 const { getMyDebts } = require('./controllers/debt.controller');
@@ -92,6 +93,7 @@ app.use('/api/support', supportRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/collections', collectionRoutes);
 app.use('/api/saas', saasRoutes);
+app.use('/api/security', securityRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
   res.json({
@@ -215,6 +217,24 @@ app.post('/login', async (req, res) => {
     }
 
     const token = signAuthToken(user);
+
+    try {
+      await prisma.auditLog.create({
+        data: {
+          action: 'LOGIN_SUCCESS',
+          entity: 'User',
+          entityId: String(user.id),
+          severity: 'INFO',
+          metadata: { role: user.role },
+          ip: req.ip || null,
+          userAgent: req.headers?.['user-agent'] || null,
+          accountId: user.accountId,
+          userId: user.id,
+        },
+      });
+    } catch (auditError) {
+      console.error('Erro ao gravar auditoria de login:', auditError);
+    }
 
     return res.json({
       message: 'Login realizado com sucesso',
