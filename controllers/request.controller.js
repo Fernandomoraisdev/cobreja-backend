@@ -4,6 +4,7 @@ const {
   enrichDebt,
   roundMoney,
 } = require('../services/debt.service');
+const { writeAuditLog } = require('../services/audit.service');
 
 function normalizePositiveInt(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -64,6 +65,21 @@ async function createRequest(req, res) {
         type,
         clientId: client.id,
         accountId: req.user.accountId,
+      },
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'CREDIT_REQUEST_CREATED',
+      entity: 'CreditRequest',
+      entityId: request.id,
+      severity: 'INFO',
+      metadata: {
+        clientId: client.id,
+        amount,
+        type,
+        requestedInstallments,
+        desiredTermDays,
       },
     });
 
@@ -251,6 +267,24 @@ async function approveRequest(req, res) {
       };
     });
 
+    await writeAuditLog({
+      req,
+      action: 'CREDIT_REQUEST_APPROVED',
+      entity: 'CreditRequest',
+      entityId: request.id,
+      severity: 'WARNING',
+      metadata: {
+        clientId: request.clientId,
+        amount: principalAmount,
+        installmentCount,
+        monthlyInterestValue,
+        dailyInterestValue,
+        dueDate,
+        debtId: result.debt?.id,
+        renegotiationId: result.renegotiation?.id,
+      },
+    });
+
     return res.json({
       message: 'Pedido aprovado e divida criada',
       data: {
@@ -289,12 +323,25 @@ async function rejectRequest(req, res) {
       return res.status(400).json({ message: 'Pedido ja processado', data: {} });
     }
 
-    await prisma.creditRequest.update({
+    const rejectedRequest = await prisma.creditRequest.update({
       where: { id: request.id },
       data: {
         status: 'REJECTED',
         decisionNote: req.body.decisionNote ? String(req.body.decisionNote).trim() : null,
         reviewedAt: new Date(),
+      },
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'CREDIT_REQUEST_REJECTED',
+      entity: 'CreditRequest',
+      entityId: rejectedRequest.id,
+      severity: 'WARNING',
+      metadata: {
+        clientId: rejectedRequest.clientId,
+        amount: rejectedRequest.amount,
+        decisionNote: rejectedRequest.decisionNote,
       },
     });
 

@@ -2,6 +2,7 @@ const prisma = require('../prisma');
 const { enrichDebt, roundMoney } = require('../services/debt.service');
 const { buildDashboardSummary } = require('../services/dashboard.service');
 const { enforceClientLimit } = require('../services/saas.service');
+const { writeAuditLog } = require('../services/audit.service');
 const bcrypt = require('bcrypt');
 
 const baseClientInclude = {
@@ -867,6 +868,20 @@ async function updateClient(req, res) {
       include: baseClientInclude,
     });
 
+    await writeAuditLog({
+      req,
+      action: 'CLIENT_EXCLUDED',
+      entity: 'Client',
+      entityId: client.id,
+      severity: 'WARNING',
+      metadata: {
+        name: client.name,
+        cpf: client.cpf,
+        email: client.email,
+        previousStatus: client.status,
+      },
+    });
+
     return res.json({
       message: 'Cliente atualizado com sucesso',
       data: serializeClient(updatedClient),
@@ -947,6 +962,20 @@ async function restoreClient(req, res) {
       include: baseClientInclude,
     });
 
+    await writeAuditLog({
+      req,
+      action: 'CLIENT_RESTORED',
+      entity: 'Client',
+      entityId: client.id,
+      severity: 'INFO',
+      metadata: {
+        name: client.name,
+        cpf: client.cpf,
+        email: client.email,
+        previousStatus: client.status,
+      },
+    });
+
     return res.json({
       message: 'Cliente restaurado com sucesso',
       data: serializeClient(restoredClient),
@@ -978,7 +1007,7 @@ async function permanentlyDeleteClient(req, res) {
       return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
     }
 
-    await prisma.$transaction([
+    const deleteResult = await prisma.$transaction([
       prisma.payment.deleteMany({
         where: {
           clientId,
@@ -1013,6 +1042,24 @@ async function permanentlyDeleteClient(req, res) {
         where: { id: clientId },
       }),
     ]);
+
+    await writeAuditLog({
+      req,
+      action: 'CLIENT_PERMANENTLY_DELETED',
+      entity: 'Client',
+      entityId: client.id,
+      severity: 'ERROR',
+      metadata: {
+        name: client.name,
+        cpf: client.cpf,
+        email: client.email,
+        deletedPayments: deleteResult[0]?.count || 0,
+        deletedInstallments: deleteResult[1]?.count || 0,
+        deletedDebts: deleteResult[2]?.count || 0,
+        deletedRenegotiations: deleteResult[3]?.count || 0,
+        deletedCreditRequests: deleteResult[4]?.count || 0,
+      },
+    });
 
     return res.json({
       message: 'Cliente removido definitivamente com sucesso',

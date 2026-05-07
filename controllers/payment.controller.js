@@ -6,6 +6,7 @@ const {
   addMonthsKeepingDay,
   roundMoney,
 } = require('../services/debt.service');
+const { writeAuditLog } = require('../services/audit.service');
 
 function startOfDay(value) {
   const date = new Date(value);
@@ -314,6 +315,22 @@ async function createPayment(req, res) {
       });
     }
 
+    await writeAuditLog({
+      req,
+      action: 'PAYMENT_CREATED',
+      entity: 'Payment',
+      entityId: refreshedPayment.id,
+      severity: 'INFO',
+      metadata: {
+        type: refreshedPayment.type,
+        amount: refreshedPayment.amount,
+        clientId: refreshedPayment.clientId,
+        debtId: refreshedPayment.debtId,
+        installmentId: refreshedPayment.installmentId,
+        paidAt: refreshedPayment.paidAt,
+      },
+    });
+
     return res.status(201).json({
       message: 'Pagamento registrado com sucesso',
       data: serializePayment(refreshedPayment),
@@ -412,6 +429,31 @@ async function updatePayment(req, res) {
       },
     });
 
+    await writeAuditLog({
+      req,
+      action: 'PAYMENT_UPDATED',
+      entity: 'Payment',
+      entityId: refreshedPayment.id,
+      severity: 'WARNING',
+      metadata: {
+        before: {
+          type: existingPayment.type,
+          amount: existingPayment.amount,
+          paidAt: existingPayment.paidAt,
+          note: existingPayment.note,
+        },
+        after: {
+          type: refreshedPayment.type,
+          amount: refreshedPayment.amount,
+          paidAt: refreshedPayment.paidAt,
+          note: refreshedPayment.note,
+        },
+        clientId: refreshedPayment.clientId,
+        debtId: refreshedPayment.debtId,
+        installmentId: refreshedPayment.installmentId,
+      },
+    });
+
     return res.json({
       message: 'Pagamento atualizado com sucesso',
       data: serializePayment(refreshedPayment),
@@ -505,6 +547,23 @@ async function deletePayment(req, res) {
           }
         }
       }
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'PAYMENT_DELETED',
+      entity: 'Payment',
+      entityId: existingPayment.id,
+      severity: 'WARNING',
+      metadata: {
+        type: existingPayment.type,
+        amount: existingPayment.amount,
+        clientId: existingPayment.clientId,
+        debtId: existingPayment.debtId,
+        installmentId: existingPayment.installmentId,
+        paidAt: existingPayment.paidAt,
+        note: existingPayment.note,
+      },
     });
 
     return res.json({
