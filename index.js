@@ -15,6 +15,7 @@ const renegotiationRoutes = require('./routes/renegotiation.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const supportRoutes = require('./routes/support.routes');
 const auditRoutes = require('./routes/audit.routes');
+const collectionRoutes = require('./routes/collection.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
 const { getMyDebts } = require('./controllers/debt.controller');
@@ -87,6 +88,7 @@ app.use('/api/renegotiation', renegotiationRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/collections', collectionRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
   res.json({
