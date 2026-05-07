@@ -9,6 +9,7 @@ const {
   createPixPayment,
   getPayment,
   mapPaymentStatus,
+  searchPayments,
   validateWebhookSignature,
 } = require('../services/mercadopago.service');
 
@@ -43,6 +44,50 @@ function serializeIntent(intent) {
     paymentId: intent.paymentId,
     createdAt: intent.createdAt,
     updatedAt: intent.updatedAt,
+  };
+}
+
+function buildMercadoPagoWebhookUrl() {
+  const baseUrl = String(process.env.BACKEND_PUBLIC_URL || '').replace(/\/+$/, '');
+  if (!baseUrl) return null;
+  return `${baseUrl}/api/payments/mercadopago/webhook`;
+}
+
+function summarizeStatuses(items, statusKey = 'status') {
+  return items.reduce((summary, item) => {
+    const status = String(item[statusKey] || 'UNKNOWN').toUpperCase();
+    summary[status] = (summary[status] || 0) + Number(item._count?._all || item.count || 0);
+    return summary;
+  }, {});
+}
+
+function serializeAdminIntent(intent) {
+  return {
+    id: intent.id,
+    status: intent.status,
+    amount: intent.amount,
+    externalReference: intent.externalReference,
+    mercadoPagoPaymentId: intent.mercadoPagoPaymentId,
+    paidAt: intent.paidAt,
+    createdAt: intent.createdAt,
+    client: intent.client
+      ? {
+          id: intent.client.id,
+          name: intent.client.name,
+          cpf: intent.client.cpf,
+          phone: intent.client.phone,
+        }
+      : null,
+    installment: intent.installment
+      ? {
+          id: intent.installment.id,
+          installmentNumber: intent.installment.installmentNumber,
+          dueDate: intent.installment.dueDate,
+          status: intent.installment.status,
+        }
+      : null,
+    debtId: intent.debtId,
+    paymentId: intent.paymentId,
   };
 }
 
@@ -451,6 +496,177 @@ async function getPixIntentStatus(req, res) {
   }
 }
 
+async function getAdminMercadoPagoSummary(req, res) {
+  try {
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({
+        message: 'Apenas ADMIN pode consultar o painel Mercado Pago',
+        data: {},
+      });
+    }
+
+    const accountId = req.user.accountId;
+    const approvedStatuses = ['APPROVED'];
+    const pendingStatuses = ['CREATED', 'PENDING', 'IN_PROCESS'];
+    const failedStatuses = ['REJECTED', 'CANCELLED', 'REFUNDED'];
+
+    const [
+      statusGroups,
+      approvedAmount,
+      pendingAmount,
+      failedAmount,
+      recentIntents,
+      webhookGroups,
+      recentWebhookLogs,
+    ] = await Promise.all([
+      prisma.paymentIntent.groupBy({
+        by: ['status'],
+        where: { accountId, provider: 'MERCADO_PAGO' },
+        _count: { _all: true },
+      }),
+      prisma.paymentIntent.aggregate({
+        where: { accountId, provider: 'MERCADO_PAGO', status: { in: approvedStatuses } },
+        _sum: { amount: true },
+      }),
+      prisma.paymentIntent.aggregate({
+        where: { accountId, provider: 'MERCADO_PAGO', status: { in: pendingStatuses } },
+        _sum: { amount: true },
+      }),
+      prisma.paymentIntent.aggregate({
+        where: { accountId, provider: 'MERCADO_PAGO', status: { in: failedStatuses } },
+        _sum: { amount: true },
+      }),
+      prisma.paymentIntent.findMany({
+        where: { accountId, provider: 'MERCADO_PAGO' },
+        include: {
+          client: true,
+          installment: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+      prisma.webhookLog.groupBy({
+        by: ['processed', 'signatureValid'],
+        where: {
+          provider: 'MERCADO_PAGO',
+          OR: [{ accountId }, { accountId: null }],
+        },
+        _count: { _all: true },
+      }),
+      prisma.webhookLog.findMany({
+        where: {
+          provider: 'MERCADO_PAGO',
+          OR: [{ accountId }, { accountId: null }],
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+
+    let mercadoPagoApi = {
+      status: process.env.MERCADO_PAGO_ACCESS_TOKEN ? 'NOT_CHECKED' : 'NOT_CONFIGURED',
+      approvedAmount: 0,
+      pendingAmount: 0,
+      paymentsCount: 0,
+      recentPayments: [],
+      error: null,
+    };
+
+    if (process.env.MERCADO_PAGO_ACCESS_TOKEN) {
+      try {
+        const apiResult = await searchPayments({
+          sort: 'date_created',
+          criteria: 'desc',
+          limit: 20,
+        });
+        const payments = Array.isArray(apiResult.results) ? apiResult.results : [];
+        mercadoPagoApi = {
+          status: 'OK',
+          approvedAmount: payments
+            .filter((payment) => payment.status === 'approved')
+            .reduce((sum, payment) => sum + Number(payment.transaction_amount || 0), 0),
+          pendingAmount: payments
+            .filter((payment) => ['pending', 'in_process'].includes(payment.status))
+            .reduce((sum, payment) => sum + Number(payment.transaction_amount || 0), 0),
+          paymentsCount: payments.length,
+          recentPayments: payments.slice(0, 8).map((payment) => ({
+            id: payment.id ? String(payment.id) : null,
+            status: payment.status,
+            statusDetail: payment.status_detail,
+            amount: payment.transaction_amount,
+            paymentMethodId: payment.payment_method_id,
+            externalReference: payment.external_reference,
+            dateCreated: payment.date_created,
+            dateApproved: payment.date_approved,
+          })),
+          error: null,
+        };
+      } catch (err) {
+        mercadoPagoApi = {
+          ...mercadoPagoApi,
+          status: 'ERROR',
+          error: err.message || 'Nao foi possivel consultar a API Mercado Pago',
+        };
+      }
+    }
+
+    const webhookCounts = recentWebhookLogs.reduce(
+      (summary, log) => {
+        if (log.processed) summary.processed += 1;
+        if (!log.signatureValid) summary.invalidSignature += 1;
+        if (log.processingError) summary.failed += 1;
+        return summary;
+      },
+      { processed: 0, failed: 0, invalidSignature: 0 },
+    );
+
+    return res.json({
+      message: 'Resumo Mercado Pago carregado',
+      data: {
+        integration: {
+          accessTokenConfigured: Boolean(process.env.MERCADO_PAGO_ACCESS_TOKEN),
+          publicKeyConfigured: Boolean(process.env.MERCADO_PAGO_PUBLIC_KEY),
+          webhookSecretConfigured: Boolean(process.env.MERCADO_PAGO_WEBHOOK_SECRET),
+          backendPublicUrlConfigured: Boolean(process.env.BACKEND_PUBLIC_URL),
+          webhookUrl: buildMercadoPagoWebhookUrl(),
+          sandboxRecommended: true,
+        },
+        local: {
+          statusCounts: summarizeStatuses(statusGroups),
+          approvedAmount: approvedAmount._sum.amount || 0,
+          pendingAmount: pendingAmount._sum.amount || 0,
+          failedAmount: failedAmount._sum.amount || 0,
+          recentIntents: recentIntents.map(serializeAdminIntent),
+        },
+        webhook: {
+          counts: webhookCounts,
+          groupedCounts: webhookGroups.map((group) => ({
+            processed: group.processed,
+            signatureValid: group.signatureValid,
+            count: group._count._all,
+          })),
+          recentLogs: recentWebhookLogs.map((log) => ({
+            id: log.id,
+            eventType: log.eventType,
+            resourceId: log.resourceId,
+            signatureValid: log.signatureValid,
+            processed: log.processed,
+            processingError: log.processingError,
+            createdAt: log.createdAt,
+          })),
+        },
+        mercadoPagoApi,
+      },
+    });
+  } catch (err) {
+    console.error('Erro ao carregar resumo Mercado Pago:', err);
+    return res.status(500).json({
+      message: err.message || 'Erro ao carregar resumo Mercado Pago',
+      data: {},
+    });
+  }
+}
+
 async function mercadoPagoWebhook(req, res) {
   const validation = validateWebhookSignature({
     headers: req.headers,
@@ -519,6 +735,7 @@ async function mercadoPagoWebhook(req, res) {
 
 module.exports = {
   createInstallmentPix,
+  getAdminMercadoPagoSummary,
   getPixIntentStatus,
   mercadoPagoWebhook,
 };

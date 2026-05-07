@@ -156,6 +156,17 @@ async function getPayment(paymentId) {
   return mercadoPagoRequest(`/v1/payments/${encodeURIComponent(paymentId)}`);
 }
 
+async function searchPayments(query = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return mercadoPagoRequest(`/v1/payments/search${suffix}`);
+}
+
 function mapPaymentStatus(status) {
   switch (String(status || '').toLowerCase()) {
     case 'approved':
@@ -178,6 +189,7 @@ function mapPaymentStatus(status) {
 module.exports = {
   createPixPayment,
   getPayment,
+  searchPayments,
   mapPaymentStatus,
   validateWebhookSignature,
 };
