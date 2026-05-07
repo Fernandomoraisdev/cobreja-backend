@@ -42,7 +42,7 @@ async function getNotificationSummary(req, res) {
     const tomorrowEnd = endOfDay(addDays(today, 1));
 
     const [
-      supportPending,
+      supportConversations,
       creditPending,
       overdueInstallments,
       dueTodayInstallments,
@@ -51,11 +51,21 @@ async function getNotificationSummary(req, res) {
       pixApprovedToday,
       invalidWebhookLogs,
     ] = await Promise.all([
-      prisma.supportConversation.count({
+      prisma.supportConversation.findMany({
         where: {
           accountId,
           status: { in: ['OPEN', 'PENDING'] },
-          messages: { some: { direction: 'INBOUND' } },
+        },
+        select: {
+          id: true,
+          messages: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              direction: true,
+              readAt: true,
+            },
+          },
         },
       }),
       prisma.creditRequest.count({
@@ -94,6 +104,11 @@ async function getNotificationSummary(req, res) {
         },
       }),
     ]);
+
+    const supportPending = supportConversations.filter((conversation) => {
+      const latest = conversation.messages?.[0];
+      return latest?.direction === 'INBOUND' && !latest.readAt;
+    }).length;
 
     const items = [];
     if (supportPending > 0) {

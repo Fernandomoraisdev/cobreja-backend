@@ -93,6 +93,7 @@ function serializeConversation(conversation, settings = null) {
       channel: message.channel,
       senderUserId: message.senderUserId,
       clientId: message.clientId,
+      readAt: message.readAt,
       createdAt: message.createdAt,
     })),
     createdAt: conversation.createdAt,
@@ -321,9 +322,44 @@ async function updateConversationStatus(req, res) {
   return res.json({ message: 'Status atualizado', data: { id: conversationId, status } });
 }
 
+async function markSupportRead(req, res) {
+  if (req.user.role !== 'ADMIN') {
+    return res.status(403).json({ message: 'Apenas ADMIN pode marcar suporte como lido', data: {} });
+  }
+
+  const accountId = Number(req.user.accountId);
+  const conversationId = Number(req.params.id || req.body.conversationId || 0);
+  const readAt = new Date();
+  const result = await prisma.supportMessage.updateMany({
+    where: {
+      accountId,
+      direction: 'INBOUND',
+      readAt: null,
+      ...(conversationId ? { conversationId } : {}),
+    },
+    data: { readAt },
+  });
+
+  if (result.count > 0) {
+    await writeAuditLog({
+      req,
+      action: 'SUPPORT_MESSAGES_READ',
+      entity: conversationId ? 'SupportConversation' : 'SupportMessage',
+      entityId: conversationId || null,
+      metadata: { count: result.count },
+    });
+  }
+
+  return res.json({
+    message: 'Mensagens marcadas como lidas',
+    data: { count: result.count, readAt },
+  });
+}
+
 module.exports = {
   listConversations,
   createConversation,
   addMessage,
+  markSupportRead,
   updateConversationStatus,
 };
