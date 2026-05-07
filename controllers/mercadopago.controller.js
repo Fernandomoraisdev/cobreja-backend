@@ -7,6 +7,7 @@ const {
 } = require('../services/debt.service');
 const {
   createPixPayment,
+  getMercadoPagoCredentialsForAccount,
   getPayment,
   mapPaymentStatus,
   searchPayments,
@@ -448,12 +449,14 @@ async function createInstallmentPix(req, res) {
       client.email ||
       client.user?.email ||
       `cliente-${client.id}@cobreja.local`;
+    const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(req.user.accountId);
 
     const mpPayment = await createPixPayment({
       amount: remaining,
       description: `COBREJA - Parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
+      accessToken: mercadoPagoCredentials.accessToken,
       payer: {
         email: payerEmail,
         firstName,
@@ -476,7 +479,10 @@ async function createInstallmentPix(req, res) {
         qrCode: transactionData.qr_code || null,
         qrCodeBase64: transactionData.qr_code_base64 || null,
         ticketUrl: transactionData.ticket_url || null,
-        rawResponse: mpPayment,
+        rawResponse: {
+          ...mpPayment,
+          credentialSource: mercadoPagoCredentials.credentialSource,
+        },
         clientId: client.id,
         debtId: installment.debtId,
         installmentId: installment.id,
@@ -621,12 +627,14 @@ async function createInstallmentAnticipationPix(req, res) {
     const idempotencyKey = `anticipation-${installment.id}-${Date.now()}`;
     const { firstName, lastName } = splitName(client.name);
     const payerEmail = client.email || client.user?.email || `cliente-${client.id}@cobreja.local`;
+    const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(req.user.accountId);
 
     const mpPayment = await createPixPayment({
       amount: quote.anticipatedAmount,
       description: `COBREJA - Antecipacao parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
+      accessToken: mercadoPagoCredentials.accessToken,
       payer: {
         email: payerEmail,
         firstName,
@@ -651,6 +659,7 @@ async function createInstallmentAnticipationPix(req, res) {
         ticketUrl: transactionData.ticket_url || null,
         rawResponse: {
           ...mpPayment,
+          credentialSource: mercadoPagoCredentials.credentialSource,
           anticipationQuote: quote,
         },
         clientId: client.id,
@@ -711,7 +720,10 @@ async function getPixIntentStatus(req, res) {
     }
 
     if (intent.mercadoPagoPaymentId && !['APPROVED', 'CANCELLED', 'REJECTED', 'REFUNDED'].includes(intent.status)) {
-      const mpPayment = await getPayment(intent.mercadoPagoPaymentId);
+      const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(req.user.accountId);
+      const mpPayment = await getPayment(intent.mercadoPagoPaymentId, {
+        accessToken: mercadoPagoCredentials.accessToken,
+      });
       await applyApprovedPayment(mpPayment);
       intent = await prisma.paymentIntent.findUnique({ where: { id: intent.id } });
     }
@@ -739,6 +751,7 @@ async function getAdminMercadoPagoSummary(req, res) {
     }
 
     const accountId = req.user.accountId;
+    const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(accountId);
     const approvedStatuses = ['APPROVED'];
     const pendingStatuses = ['CREATED', 'PENDING', 'IN_PROCESS'];
     const failedStatuses = ['REJECTED', 'CANCELLED', 'REFUNDED'];
@@ -797,7 +810,7 @@ async function getAdminMercadoPagoSummary(req, res) {
     ]);
 
     let mercadoPagoApi = {
-      status: process.env.MERCADO_PAGO_ACCESS_TOKEN ? 'NOT_CHECKED' : 'NOT_CONFIGURED',
+      status: mercadoPagoCredentials.accessTokenConfigured ? 'NOT_CHECKED' : 'NOT_CONFIGURED',
       approvedAmount: 0,
       pendingAmount: 0,
       paymentsCount: 0,
@@ -805,12 +818,14 @@ async function getAdminMercadoPagoSummary(req, res) {
       error: null,
     };
 
-    if (process.env.MERCADO_PAGO_ACCESS_TOKEN) {
+    if (mercadoPagoCredentials.accessTokenConfigured) {
       try {
         const apiResult = await searchPayments({
           sort: 'date_created',
           criteria: 'desc',
           limit: 20,
+        }, {
+          accessToken: mercadoPagoCredentials.accessToken,
         });
         const payments = Array.isArray(apiResult.results) ? apiResult.results : [];
         mercadoPagoApi = {
@@ -857,10 +872,15 @@ async function getAdminMercadoPagoSummary(req, res) {
       message: 'Resumo Mercado Pago carregado',
       data: {
         integration: {
-          accessTokenConfigured: Boolean(process.env.MERCADO_PAGO_ACCESS_TOKEN),
-          publicKeyConfigured: Boolean(process.env.MERCADO_PAGO_PUBLIC_KEY),
-          webhookSecretConfigured: Boolean(process.env.MERCADO_PAGO_WEBHOOK_SECRET),
-          backendPublicUrlConfigured: Boolean(process.env.BACKEND_PUBLIC_URL),
+          accessTokenConfigured: mercadoPagoCredentials.accessTokenConfigured,
+          publicKeyConfigured: mercadoPagoCredentials.publicKeyConfigured,
+          webhookSecretConfigured: mercadoPagoCredentials.webhookSecretConfigured,
+          backendPublicUrlConfigured: mercadoPagoCredentials.backendPublicUrlConfigured,
+          credentialSource: mercadoPagoCredentials.credentialSource,
+          webhookSecretSource: mercadoPagoCredentials.webhookSecretSource,
+          maskedAccessToken: mercadoPagoCredentials.maskedAccessToken,
+          maskedPublicKey: mercadoPagoCredentials.maskedPublicKey,
+          maskedWebhookSecret: mercadoPagoCredentials.maskedWebhookSecret,
           webhookUrl: buildMercadoPagoWebhookUrl(),
           sandboxRecommended: true,
         },
@@ -901,12 +921,26 @@ async function getAdminMercadoPagoSummary(req, res) {
 }
 
 async function mercadoPagoWebhook(req, res) {
+  const payload = req.body || {};
+  const initialResourceId = req.query?.['data.id'] || req.query?.id || payload?.data?.id || payload?.id || payload?.resource;
+  const knownIntent = initialResourceId
+    ? await prisma.paymentIntent.findFirst({
+        where: {
+          provider: 'MERCADO_PAGO',
+          mercadoPagoPaymentId: String(initialResourceId),
+        },
+        select: { id: true, accountId: true },
+      })
+    : null;
+  const mercadoPagoCredentials = knownIntent
+    ? await getMercadoPagoCredentialsForAccount(knownIntent.accountId)
+    : await getMercadoPagoCredentialsForAccount(null);
   const validation = validateWebhookSignature({
     headers: req.headers,
     query: req.query,
     payload: req.body,
+    secret: mercadoPagoCredentials.webhookSecret,
   });
-  const payload = req.body || {};
   const resourceId = validation.dataId || payload?.data?.id || payload?.id || payload?.resource;
   const eventType = payload?.type || payload?.action || req.query?.type || null;
 
@@ -916,6 +950,7 @@ async function mercadoPagoWebhook(req, res) {
       eventType: eventType ? String(eventType) : null,
       eventId: payload?.id ? String(payload.id) : null,
       resourceId: resourceId ? String(resourceId) : null,
+      accountId: knownIntent?.accountId || null,
       signatureValid: validation.valid,
       headers: {
         'x-signature': req.headers['x-signature'] || null,
@@ -940,7 +975,9 @@ async function mercadoPagoWebhook(req, res) {
       throw new Error('Webhook sem data.id/resource');
     }
 
-    const mpPayment = await getPayment(resourceId);
+    const mpPayment = await getPayment(resourceId, {
+      accessToken: mercadoPagoCredentials.accessToken,
+    });
     const result = await applyApprovedPayment(mpPayment, { rawWebhook: payload });
 
     await prisma.webhookLog.update({

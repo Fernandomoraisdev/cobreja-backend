@@ -1,9 +1,17 @@
 const crypto = require('crypto');
+const prisma = require('../prisma');
 
 const MERCADO_PAGO_API_BASE = 'https://api.mercadopago.com';
 
-function requiredAccessToken() {
-  const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+function maskSecret(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (text.length <= 10) return `${text.slice(0, 2)}...${text.slice(-2)}`;
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
+function requiredAccessToken(accessToken) {
+  const token = accessToken || process.env.MERCADO_PAGO_ACCESS_TOKEN;
   if (!token) {
     throw new Error('MERCADO_PAGO_ACCESS_TOKEN nao configurado');
   }
@@ -37,9 +45,48 @@ function parseSignatureHeader(value) {
   return parsed;
 }
 
-function validateWebhookSignature({ headers, query, payload }) {
-  const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
-  if (!secret) {
+function readMercadoPagoSettings(settings = {}) {
+  const accountAccessToken =
+    settings.useAccountCredentials === true ? String(settings.accessToken || '').trim() : '';
+  const accountPublicKey =
+    settings.useAccountCredentials === true ? String(settings.publicKey || '').trim() : '';
+  const accountWebhookSecret =
+    settings.useAccountCredentials === true ? String(settings.webhookSecret || '').trim() : '';
+  const accessToken = accountAccessToken || String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '').trim();
+  const publicKey = accountPublicKey || String(process.env.MERCADO_PAGO_PUBLIC_KEY || '').trim();
+  const webhookSecret =
+    accountWebhookSecret || String(process.env.MERCADO_PAGO_WEBHOOK_SECRET || '').trim();
+
+  return {
+    accessToken,
+    publicKey,
+    webhookSecret,
+    useAccountCredentials: settings.useAccountCredentials === true,
+    sandbox: settings.sandbox !== false,
+    credentialSource: accountAccessToken ? 'ACCOUNT' : accessToken ? 'ENV' : 'NONE',
+    webhookSecretSource: accountWebhookSecret ? 'ACCOUNT' : webhookSecret ? 'ENV' : 'NONE',
+    accessTokenConfigured: Boolean(accessToken),
+    publicKeyConfigured: Boolean(publicKey),
+    webhookSecretConfigured: Boolean(webhookSecret),
+    backendPublicUrlConfigured: Boolean(process.env.BACKEND_PUBLIC_URL),
+    maskedAccessToken: maskSecret(accessToken),
+    maskedPublicKey: maskSecret(publicKey),
+    maskedWebhookSecret: maskSecret(webhookSecret),
+  };
+}
+
+async function getMercadoPagoCredentialsForAccount(accountId) {
+  if (!accountId) return readMercadoPagoSettings();
+  const row = await prisma.accountSettings.findUnique({
+    where: { accountId: Number(accountId) },
+    select: { mercadoPago: true },
+  });
+  return readMercadoPagoSettings(row?.mercadoPago || {});
+}
+
+function validateWebhookSignature({ headers, query, payload, secret }) {
+  const webhookSecret = secret || process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+  if (!webhookSecret) {
     return { valid: false, reason: 'MERCADO_PAGO_WEBHOOK_SECRET nao configurado' };
   }
 
@@ -61,7 +108,7 @@ function validateWebhookSignature({ headers, query, payload }) {
 
   const signedTemplate = `id:${dataId};request-id:${requestId};ts:${ts};`;
   const expected = crypto
-    .createHmac('sha256', secret)
+    .createHmac('sha256', webhookSecret)
     .update(signedTemplate)
     .digest('hex');
 
@@ -78,9 +125,9 @@ function validateWebhookSignature({ headers, query, payload }) {
   };
 }
 
-async function mercadoPagoRequest(path, { method = 'GET', body, idempotencyKey } = {}) {
+async function mercadoPagoRequest(path, { method = 'GET', body, idempotencyKey, accessToken } = {}) {
   const headers = {
-    Authorization: `Bearer ${requiredAccessToken()}`,
+    Authorization: `Bearer ${requiredAccessToken(accessToken)}`,
     'Content-Type': 'application/json',
   };
 
@@ -119,6 +166,7 @@ async function createPixPayment({
   payer,
   externalReference,
   idempotencyKey,
+  accessToken,
 }) {
   const body = {
     transaction_amount: amount,
@@ -149,14 +197,15 @@ async function createPixPayment({
     method: 'POST',
     body,
     idempotencyKey,
+    accessToken,
   });
 }
 
-async function getPayment(paymentId) {
-  return mercadoPagoRequest(`/v1/payments/${encodeURIComponent(paymentId)}`);
+async function getPayment(paymentId, { accessToken } = {}) {
+  return mercadoPagoRequest(`/v1/payments/${encodeURIComponent(paymentId)}`, { accessToken });
 }
 
-async function searchPayments(query = {}) {
+async function searchPayments(query = {}, { accessToken } = {}) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== null && String(value).trim() !== '') {
@@ -164,7 +213,7 @@ async function searchPayments(query = {}) {
     }
   }
   const suffix = params.toString() ? `?${params.toString()}` : '';
-  return mercadoPagoRequest(`/v1/payments/search${suffix}`);
+  return mercadoPagoRequest(`/v1/payments/search${suffix}`, { accessToken });
 }
 
 function mapPaymentStatus(status) {
@@ -188,8 +237,11 @@ function mapPaymentStatus(status) {
 
 module.exports = {
   createPixPayment,
+  getMercadoPagoCredentialsForAccount,
   getPayment,
   searchPayments,
   mapPaymentStatus,
+  maskSecret,
+  readMercadoPagoSettings,
   validateWebhookSignature,
 };

@@ -1,5 +1,6 @@
 const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
+const { readMercadoPagoSettings } = require('../services/mercadopago.service');
 
 const SETTINGS_KEYS = [
   'company',
@@ -41,6 +42,11 @@ function defaultSettings(account) {
       renegotiationRules: '',
     },
     mercadoPago: {
+      useAccountCredentials: false,
+      sandbox: true,
+      accessToken: null,
+      publicKey: null,
+      webhookSecret: null,
       integrationStatus: process.env.MERCADO_PAGO_ACCESS_TOKEN ? 'CONFIGURED' : 'PENDING',
       webhookStatus: process.env.MERCADO_PAGO_WEBHOOK_SECRET ? 'CONFIGURED' : 'PENDING',
       availableBalance: null,
@@ -95,6 +101,58 @@ function mergeSettings(base, saved) {
   return merged;
 }
 
+function sanitizeMercadoPagoSettings(settings = {}) {
+  const credentials = readMercadoPagoSettings(settings);
+  const {
+    accessToken,
+    publicKey,
+    webhookSecret,
+    ...safeCredentials
+  } = credentials;
+
+  return {
+    ...settings,
+    accessToken: undefined,
+    publicKey: undefined,
+    webhookSecret: undefined,
+    ...safeCredentials,
+    hasAccountAccessToken: Boolean(settings.accessToken),
+    hasAccountPublicKey: Boolean(settings.publicKey),
+    hasAccountWebhookSecret: Boolean(settings.webhookSecret),
+    integrationStatus: credentials.accessTokenConfigured ? 'CONFIGURED' : 'PENDING',
+    webhookStatus: credentials.webhookSecretConfigured ? 'CONFIGURED' : 'PENDING',
+  };
+}
+
+function sanitizeSettings(settings) {
+  return {
+    ...settings,
+    mercadoPago: sanitizeMercadoPagoSettings(settings.mercadoPago || {}),
+  };
+}
+
+function mergeMercadoPagoUpdate(current = {}, incoming = {}) {
+  const next = {
+    ...current,
+    ...incoming,
+  };
+
+  for (const key of ['accessToken', 'publicKey', 'webhookSecret']) {
+    const clearKey = `clear${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+    const value = incoming[key];
+    if (incoming[clearKey] === true) {
+      next[key] = null;
+    } else if (typeof value === 'string' && value.trim()) {
+      next[key] = value.trim();
+    } else {
+      next[key] = current[key] || null;
+    }
+    delete next[clearKey];
+  }
+
+  return next;
+}
+
 async function ensureAccountSettings(accountId) {
   const account = await prisma.account.findUnique({
     where: { id: accountId },
@@ -130,7 +188,7 @@ async function getSettings(req, res) {
 
   return res.json({
     message: 'Configuracoes carregadas',
-    data: result.settings,
+    data: sanitizeSettings(result.settings),
   });
 }
 
@@ -148,10 +206,12 @@ async function updateSettings(req, res) {
   const data = {};
   for (const key of SETTINGS_KEYS) {
     if (req.body[key] && typeof req.body[key] === 'object' && !Array.isArray(req.body[key])) {
-      data[key] = {
-        ...(result.settings[key] || {}),
-        ...req.body[key],
-      };
+      data[key] = key === 'mercadoPago'
+        ? mergeMercadoPagoUpdate(result.settings[key] || {}, req.body[key])
+        : {
+            ...(result.settings[key] || {}),
+            ...req.body[key],
+          };
     }
   }
 
@@ -170,7 +230,7 @@ async function updateSettings(req, res) {
 
   return res.json({
     message: 'Configuracoes atualizadas',
-    data: mergeSettings(defaultSettings(result.account), updated),
+    data: sanitizeSettings(mergeSettings(defaultSettings(result.account), updated)),
   });
 }
 
