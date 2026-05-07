@@ -15,6 +15,39 @@ const SETTINGS_KEYS = [
   'automation',
 ];
 
+const DEFAULT_WHATSAPP_TEMPLATES = [
+  {
+    type: 'DUE_TODAY',
+    title: 'Vencimento hoje',
+    body: [
+      'Ola, {{cliente}}.',
+      'Passando para lembrar que sua parcela {{parcela}} vence hoje ({{vencimento}}).',
+      'Valor da parcela: {{valor}}.',
+      'Se quiser, posso te enviar o Pix para pagamento.',
+    ].join('\n\n'),
+  },
+  {
+    type: 'DUE_TOMORROW',
+    title: 'Vencimento amanha',
+    body: [
+      'Ola, {{cliente}}.',
+      'Sua parcela {{parcela}} vence amanha ({{vencimento}}).',
+      'Valor previsto: {{valor}}.',
+      'Se quiser adiantar, posso te enviar o Pix.',
+    ].join('\n\n'),
+  },
+  {
+    type: 'OVERDUE',
+    title: 'Parcela em atraso',
+    body: [
+      'Ola, {{cliente}}.',
+      'Identificamos que sua parcela {{parcela}} venceu em {{vencimento}} e esta com {{diasAtraso}} dia(s) de atraso.',
+      'Valor atualizado da parcela: {{valor}}.',
+      'Se ja realizou o pagamento, por favor desconsidere esta mensagem. Caso precise, posso te enviar o Pix para regularizar.',
+    ].join('\n\n'),
+  },
+];
+
 function defaultSettings(account) {
   return {
     company: {
@@ -56,7 +89,7 @@ function defaultSettings(account) {
     whatsapp: {
       connectionStatus: 'NOT_CONNECTED',
       qrCode: null,
-      templates: [],
+      templates: DEFAULT_WHATSAPP_TEMPLATES,
       billingAutomationEnabled: false,
     },
     saas: {

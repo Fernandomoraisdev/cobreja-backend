@@ -1,6 +1,39 @@
 const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
 
+const DEFAULT_WHATSAPP_TEMPLATES = [
+  {
+    type: 'DUE_TODAY',
+    title: 'Vencimento hoje',
+    body: [
+      'Ola, {{cliente}}.',
+      'Passando para lembrar que sua parcela {{parcela}} vence hoje ({{vencimento}}).',
+      'Valor da parcela: {{valor}}.',
+      'Se quiser, posso te enviar o Pix para pagamento.',
+    ].join('\n\n'),
+  },
+  {
+    type: 'DUE_TOMORROW',
+    title: 'Vencimento amanha',
+    body: [
+      'Ola, {{cliente}}.',
+      'Sua parcela {{parcela}} vence amanha ({{vencimento}}).',
+      'Valor previsto: {{valor}}.',
+      'Se quiser adiantar, posso te enviar o Pix.',
+    ].join('\n\n'),
+  },
+  {
+    type: 'OVERDUE',
+    title: 'Parcela em atraso',
+    body: [
+      'Ola, {{cliente}}.',
+      'Identificamos que sua parcela {{parcela}} venceu em {{vencimento}} e esta com {{diasAtraso}} dia(s) de atraso.',
+      'Valor atualizado da parcela: {{valor}}.',
+      'Se ja realizou o pagamento, por favor desconsidere esta mensagem. Caso precise, posso te enviar o Pix para regularizar.',
+    ].join('\n\n'),
+  },
+];
+
 function startOfDay(date = new Date()) {
   const result = new Date(date);
   result.setHours(0, 0, 0, 0);
@@ -51,10 +84,39 @@ function daysBetween(start, end) {
   return Math.max(Math.floor((endTime - startTime) / 86400000), 0);
 }
 
-function buildCollectionMessage({ client, installment, remaining, daysLate }) {
+function templateForType(settings, type) {
+  const templates = Array.isArray(settings?.whatsapp?.templates)
+    ? settings.whatsapp.templates
+    : [];
+  const custom = templates.find((template) => String(template?.type || '').toUpperCase() === type);
+  const fallback = DEFAULT_WHATSAPP_TEMPLATES.find((template) => template.type === type);
+  return String(custom?.body || fallback?.body || '').trim();
+}
+
+function renderTemplate(template, values) {
+  return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
+    const normalizedKey = String(key || '').trim();
+    return values[normalizedKey] ?? values[normalizedKey.toLowerCase()] ?? '';
+  });
+}
+
+function buildCollectionMessage({ client, installment, remaining, daysLate, settings, type }) {
   const name = String(client?.name || 'cliente').trim();
   const dueDate = formatDate(installment.dueDate);
   const amount = formatMoney(remaining);
+  const companyName = String(settings?.company?.name || 'COBREJA').trim();
+  const template = templateForType(settings, type);
+
+  if (template) {
+    return renderTemplate(template, {
+      cliente: name,
+      parcela: installment.installmentNumber,
+      vencimento: dueDate,
+      valor: amount,
+      diasAtraso: daysLate,
+      empresa: companyName,
+    });
+  }
 
   if (daysLate > 0) {
     return [
@@ -73,18 +135,21 @@ function buildCollectionMessage({ client, installment, remaining, daysLate }) {
   ].join('\n\n');
 }
 
-function serializeCollectionItem(installment, today = new Date()) {
+function serializeCollectionItem(installment, today = new Date(), settings = {}, typeOverride = null) {
   const remaining = roundMoney(
     Math.max(Number(installment.amount || 0) - Number(installment.paidAmount || 0), 0),
   );
   const daysLate = new Date(installment.dueDate) < startOfDay(today)
     ? daysBetween(installment.dueDate, today)
     : 0;
+  const type = typeOverride || (daysLate > 0 ? 'OVERDUE' : 'DUE_TODAY');
   const message = buildCollectionMessage({
     client: installment.client,
     installment,
     remaining,
     daysLate,
+    settings,
+    type,
   });
 
   return {
@@ -97,7 +162,7 @@ function serializeCollectionItem(installment, today = new Date()) {
     paidAmount: installment.paidAmount,
     remaining,
     daysLate,
-    type: daysLate > 0 ? 'OVERDUE' : 'DUE_TODAY',
+    type,
     message,
     whatsappLink: buildWhatsAppLink(installment.client?.phone, message),
     client: installment.client
@@ -167,13 +232,17 @@ async function listCollectionAutomation(req, res) {
         take: 120,
       }),
     ]);
+    const settings = await prisma.accountSettings.findUnique({
+      where: { accountId },
+      select: { company: true, whatsapp: true },
+    });
 
-    const dueTodayItems = dueToday.map((item) => serializeCollectionItem(item, today));
-    const dueTomorrowItems = dueTomorrow.map((item) => ({
-      ...serializeCollectionItem(item, today),
-      type: 'DUE_TOMORROW',
-    }));
-    const overdueItems = overdue.map((item) => serializeCollectionItem(item, today));
+    const dueTodayItems = dueToday.map((item) =>
+      serializeCollectionItem(item, today, settings, 'DUE_TODAY'));
+    const dueTomorrowItems = dueTomorrow.map((item) =>
+      serializeCollectionItem(item, today, settings, 'DUE_TOMORROW'));
+    const overdueItems = overdue.map((item) =>
+      serializeCollectionItem(item, today, settings, 'OVERDUE'));
     const allItems = [...dueTodayItems, ...dueTomorrowItems, ...overdueItems];
 
     return res.json({
@@ -192,6 +261,12 @@ async function listCollectionAutomation(req, res) {
         dueToday: dueTodayItems,
         dueTomorrow: dueTomorrowItems,
         overdue: overdueItems,
+        templates: {
+          defaults: DEFAULT_WHATSAPP_TEMPLATES,
+          active: Array.isArray(settings?.whatsapp?.templates)
+            ? settings.whatsapp.templates
+            : DEFAULT_WHATSAPP_TEMPLATES,
+        },
       },
     });
   } catch (err) {
@@ -230,7 +305,11 @@ async function registerCollectionGenerated(req, res) {
       return res.status(404).json({ message: 'Parcela nao encontrada', data: {} });
     }
 
-    const item = serializeCollectionItem(installment);
+    const settings = await prisma.accountSettings.findUnique({
+      where: { accountId: req.user.accountId },
+      select: { company: true, whatsapp: true },
+    });
+    const item = serializeCollectionItem(installment, new Date(), settings);
     const channel = String(req.body.channel || 'WHATSAPP_MANUAL').trim().toUpperCase();
 
     await writeAuditLog({
