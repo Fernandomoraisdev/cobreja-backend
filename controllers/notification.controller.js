@@ -18,6 +18,12 @@ function addDays(date, days) {
   return result;
 }
 
+function daysUntil(date, from = new Date()) {
+  if (!date) return null;
+  const diff = startOfDay(date).getTime() - startOfDay(from).getTime();
+  return Math.ceil(diff / 86400000);
+}
+
 function notification({ type, severity = 'INFO', title, message, count = 1, action = null }) {
   return {
     type,
@@ -51,6 +57,7 @@ async function getNotificationSummary(req, res) {
       pixPending,
       pixApprovedToday,
       invalidWebhookLogs,
+      subscription,
     ] = await Promise.all([
       prisma.accountSettings.findUnique({
         where: { accountId },
@@ -108,6 +115,11 @@ async function getNotificationSummary(req, res) {
           createdAt: { gte: addDays(today, -7) },
         },
       }),
+      prisma.subscription.findFirst({
+        where: { accountId },
+        include: { plan: true },
+        orderBy: { updatedAt: 'desc' },
+      }),
     ]);
 
     const supportPending = supportConversations.filter((conversation) => {
@@ -120,9 +132,37 @@ async function getNotificationSummary(req, res) {
       support: notificationSettings.support !== false,
       pix: notificationSettings.pix !== false,
       credit: notificationSettings.credit !== false,
+      saas: notificationSettings.saas !== false,
     };
 
     const items = [];
+    if (enabled.saas && subscription) {
+      const status = String(subscription.status || '').toUpperCase();
+      const endDate = status === 'TRIAL'
+        ? subscription.trialEndsAt
+        : subscription.currentPeriodEnd;
+      const remainingDays = daysUntil(endDate, today);
+      if (remainingDays !== null && remainingDays < 0) {
+        items.push(notification({
+          type: 'SAAS_EXPIRED',
+          severity: 'ERROR',
+          title: status === 'TRIAL' ? 'Trial vencido' : 'Assinatura vencida',
+          message: `Plano ${subscription.plan?.name || '-'} venceu ha ${Math.abs(remainingDays)} dia(s).`,
+          count: 1,
+          action: 'SAAS',
+        }));
+      } else if (remainingDays !== null && remainingDays <= 7) {
+        items.push(notification({
+          type: 'SAAS_EXPIRING',
+          severity: 'WARNING',
+          title: status === 'TRIAL' ? 'Trial perto do fim' : 'Assinatura perto do fim',
+          message: `Plano ${subscription.plan?.name || '-'} vence em ${remainingDays} dia(s).`,
+          count: 1,
+          action: 'SAAS',
+        }));
+      }
+    }
+
     if (enabled.support && supportPending > 0) {
       items.push(notification({
         type: 'SUPPORT_PENDING',

@@ -113,6 +113,7 @@ function defaultSettings(account) {
       support: true,
       pix: true,
       credit: true,
+      saas: true,
     },
     security: {
       requireDoubleConfirmation: true,
