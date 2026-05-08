@@ -58,6 +58,7 @@ async function getNotificationSummary(req, res) {
       pixApprovedToday,
       invalidWebhookLogs,
       subscription,
+      activeClients,
     ] = await Promise.all([
       prisma.accountSettings.findUnique({
         where: { accountId },
@@ -120,6 +121,9 @@ async function getNotificationSummary(req, res) {
         include: { plan: true },
         orderBy: { updatedAt: 'desc' },
       }),
+      prisma.client.count({
+        where: { accountId, status: 'ACTIVE' },
+      }),
     ]);
 
     const supportPending = supportConversations.filter((conversation) => {
@@ -137,6 +141,30 @@ async function getNotificationSummary(req, res) {
 
     const items = [];
     if (enabled.saas && subscription) {
+      const clientLimit = subscription.plan?.clientLimit;
+      if (clientLimit && clientLimit > 0) {
+        const usagePercent = activeClients / clientLimit;
+        if (activeClients >= clientLimit) {
+          items.push(notification({
+            type: 'SAAS_CLIENT_LIMIT_REACHED',
+            severity: 'ERROR',
+            title: 'Limite de clientes atingido',
+            message: `${activeClients}/${clientLimit} clientes ativos no plano ${subscription.plan?.name || '-'}.`,
+            count: 1,
+            action: 'SAAS',
+          }));
+        } else if (usagePercent >= 0.9) {
+          items.push(notification({
+            type: 'SAAS_CLIENT_LIMIT_NEAR',
+            severity: 'WARNING',
+            title: 'Limite de clientes quase atingido',
+            message: `${activeClients}/${clientLimit} clientes ativos no plano ${subscription.plan?.name || '-'}.`,
+            count: 1,
+            action: 'SAAS',
+          }));
+        }
+      }
+
       const status = String(subscription.status || '').toUpperCase();
       const endDate = status === 'TRIAL'
         ? subscription.trialEndsAt
