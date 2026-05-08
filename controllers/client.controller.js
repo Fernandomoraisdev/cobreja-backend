@@ -870,15 +870,16 @@ async function updateClient(req, res) {
 
     await writeAuditLog({
       req,
-      action: 'CLIENT_EXCLUDED',
+      action: 'CLIENT_UPDATED',
       entity: 'Client',
-      entityId: client.id,
-      severity: 'WARNING',
+      entityId: updatedClient.id,
+      severity: 'INFO',
       metadata: {
-        name: client.name,
-        cpf: client.cpf,
-        email: client.email,
-        previousStatus: client.status,
+        name: updatedClient.name,
+        cpf: updatedClient.cpf,
+        email: updatedClient.email,
+        previousStatus: existingClient.status,
+        status: updatedClient.status,
       },
     });
 
