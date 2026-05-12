@@ -20,8 +20,10 @@ const saasRoutes = require('./routes/saas.routes');
 const securityRoutes = require('./routes/security.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
 const notificationRoutes = require('./routes/notification.routes');
+const superAdminRoutes = require('./routes/superAdmin.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
+const { isSuperAdminUser } = require('./utils/superAdmin');
 const { getMyDebts } = require('./controllers/debt.controller');
 const { getMyPayments } = require('./controllers/payment.controller');
 const { enforceClientLimit } = require('./services/saas.service');
@@ -98,6 +100,7 @@ app.use('/api/saas', saasRoutes);
 app.use('/api/security', securityRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/super-admin', superAdminRoutes);
 
 app.get('/teste-saas', authMiddleware, (req, res) => {
   res.json({
@@ -140,6 +143,7 @@ app.get('/me', authMiddleware, async (req, res) => {
     message: 'Usuario carregado com sucesso',
     data: {
       user: sanitizeUser(user),
+      isSuperAdmin: isSuperAdminUser(user),
       account,
       client: client || null,
     },

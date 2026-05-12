@@ -11,6 +11,8 @@ function signAuthToken(user) {
       cpf: user.cpf,
       accountId: user.accountId,
       role: user.role,
+      impersonatedBySuperAdmin: user.impersonatedBySuperAdmin || false,
+      originalSuperAdminUserId: user.originalSuperAdminUserId || null,
     },
     SECRET,
     { expiresIn: '7d' },
