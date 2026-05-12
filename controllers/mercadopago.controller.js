@@ -1,4 +1,4 @@
-const prisma = require('../prisma');
+﻿const prisma = require('../prisma');
 const {
   MONEY_EPSILON,
   buildDebtUpdateFromState,
@@ -20,8 +20,8 @@ function onlyDigits(value) {
 
 function splitName(name) {
   const parts = String(name || 'Cliente').trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return { firstName: 'Cliente', lastName: 'COBREJA' };
-  if (parts.length === 1) return { firstName: parts[0], lastName: 'COBREJA' };
+  if (!parts.length) return { firstName: 'Cliente', lastName: 'PEGUEI&PAGUEI' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: 'PEGUEI&PAGUEI' };
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
 }
 
@@ -442,18 +442,18 @@ async function createInstallmentPix(req, res) {
       });
     }
 
-    const externalReference = `cobreja:installment:${installment.id}:${Date.now()}`;
+    const externalReference = `pegueipaguei:installment:${installment.id}:${Date.now()}`;
     const idempotencyKey = `installment-${installment.id}-${Date.now()}`;
     const { firstName, lastName } = splitName(client.name);
     const payerEmail =
       client.email ||
       client.user?.email ||
-      `cliente-${client.id}@cobreja.local`;
+      `cliente-${client.id}@pegueipaguei.local`;
     const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(req.user.accountId);
 
     const mpPayment = await createPixPayment({
       amount: remaining,
-      description: `COBREJA - Parcela ${installment.installmentNumber}`,
+      description: `PEGUEI&PAGUEI - Parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
       accessToken: mercadoPagoCredentials.accessToken,
@@ -623,15 +623,15 @@ async function createInstallmentAnticipationPix(req, res) {
       });
     }
 
-    const externalReference = `cobreja:anticipation:${installment.id}:${Date.now()}`;
+    const externalReference = `pegueipaguei:anticipation:${installment.id}:${Date.now()}`;
     const idempotencyKey = `anticipation-${installment.id}-${Date.now()}`;
     const { firstName, lastName } = splitName(client.name);
-    const payerEmail = client.email || client.user?.email || `cliente-${client.id}@cobreja.local`;
+    const payerEmail = client.email || client.user?.email || `cliente-${client.id}@pegueipaguei.local`;
     const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(req.user.accountId);
 
     const mpPayment = await createPixPayment({
       amount: quote.anticipatedAmount,
-      description: `COBREJA - Antecipacao parcela ${installment.installmentNumber}`,
+      description: `PEGUEI&PAGUEI - Antecipacao parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
       accessToken: mercadoPagoCredentials.accessToken,

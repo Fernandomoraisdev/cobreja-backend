@@ -1,4 +1,4 @@
-const prisma = require('../prisma');
+﻿const prisma = require('../prisma');
 const { enrichDebt, roundMoney } = require('../services/debt.service');
 const { buildDashboardSummary } = require('../services/dashboard.service');
 const { enforceClientLimit } = require('../services/saas.service');
@@ -368,9 +368,9 @@ async function createClientLogin(req, res) {
 
     const cpf = normalizeCpf(req.body.cpf ?? client.cpf);
     const clientEmail = normalizeEmail(req.body.email ?? client.email);
-    // O User.email é obrigatório no banco. Se o cliente não tiver email, geramos um placeholder
-    // só para fins de autenticação, mas não salvamos isso no perfil do cliente.
-    const email = clientEmail ?? `cliente-${client.id}@cobreja.local`;
+    // O User.email Ã© obrigatÃ³rio no banco. Se o cliente nÃ£o tiver email, geramos um placeholder
+    // sÃ³ para fins de autenticaÃ§Ã£o, mas nÃ£o salvamos isso no perfil do cliente.
+    const email = clientEmail ?? `cliente-${client.id}@pegueipaguei.local`;
 
     if (!cpf && !clientEmail) {
       return res.status(400).json({
@@ -429,7 +429,7 @@ async function createClientLogin(req, res) {
         where: { id: client.id },
         data: {
           userId: user.id,
-          // Mantém o perfil do cliente preenchido com dados reais quando informados.
+          // MantÃ©m o perfil do cliente preenchido com dados reais quando informados.
           ...(cpf ? { cpf } : {}),
           ...(clientEmail ? { email: clientEmail } : {}),
           ...(phone ? { phone } : {}),
@@ -623,8 +623,8 @@ async function mergeClientDuplicates(req, res) {
         ),
       );
 
-      // Regra de seguranÃ§a: nÃ£o unificamos registros com logins diferentes,
-      // para nÃ£o misturar carteiras de pessoas distintas.
+      // Regra de seguranÃƒÂ§a: nÃƒÂ£o unificamos registros com logins diferentes,
+      // para nÃƒÂ£o misturar carteiras de pessoas distintas.
       if (linkedUserIds.length > 1) {
         throw new Error(
           `Nao e possivel unificar porque existem multiplos logins vinculados: ${linkedUserIds.join(
@@ -703,8 +703,8 @@ async function mergeClientDuplicates(req, res) {
         },
       });
 
-      // Se o login estava no duplicado e o registro-alvo nÃ£o tinha userId, transferimos
-      // o vÃ­nculo para o registro que recebeu as dÃ­vidas.
+      // Se o login estava no duplicado e o registro-alvo nÃƒÂ£o tinha userId, transferimos
+      // o vÃƒÂ­nculo para o registro que recebeu as dÃƒÂ­vidas.
       if (!client.userId && linkedUserIds.length === 1) {
         await tx.client.update({
           where: { id: client.id },

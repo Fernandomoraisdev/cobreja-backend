@@ -1,4 +1,4 @@
-const prisma = require('../prisma');
+﻿const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
 const { readMercadoPagoSettings } = require('../services/mercadopago.service');
 
@@ -51,7 +51,7 @@ const DEFAULT_WHATSAPP_TEMPLATES = [
 function defaultSettings(account) {
   return {
     company: {
-      name: account?.name || 'COBREJA',
+      name: account?.name || 'PEGUEI&PAGUEI',
       logoUrl: null,
       faviconUrl: null,
       cnpj: null,

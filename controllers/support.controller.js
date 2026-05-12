@@ -1,4 +1,4 @@
-const prisma = require('../prisma');
+﻿const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
 
 function onlyDigits(value) {
@@ -33,7 +33,7 @@ function latestMessage(conversation) {
 function buildAdminSupportNotification({ conversation, message, settings }) {
   const clientName = conversation.client?.name || 'Cliente';
   const subject = conversation.subject || 'Suporte';
-  const companyName = settings?.company?.name || 'COBREJA';
+  const companyName = settings?.company?.name || 'PEGUEI&PAGUEI';
   const adminPhone =
     settings?.whatsapp?.adminPhone ||
     settings?.company?.phone ||

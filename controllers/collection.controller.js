@@ -1,4 +1,4 @@
-const prisma = require('../prisma');
+﻿const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
 
 const DEFAULT_WHATSAPP_TEMPLATES = [
@@ -104,7 +104,7 @@ function buildCollectionMessage({ client, installment, remaining, daysLate, sett
   const name = String(client?.name || 'cliente').trim();
   const dueDate = formatDate(installment.dueDate);
   const amount = formatMoney(remaining);
-  const companyName = String(settings?.company?.name || 'COBREJA').trim();
+  const companyName = String(settings?.company?.name || 'PEGUEI&PAGUEI').trim();
   const template = templateForType(settings, type);
 
   if (template) {

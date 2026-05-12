@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
@@ -44,7 +44,7 @@ function normalizeInviteCode(value) {
 }
 
 function buildInviteCode(accountName) {
-  const prefix = normalizeInviteCode(accountName).slice(0, 6) || 'COBREJA';
+  const prefix = normalizeInviteCode(accountName).slice(0, 6) || 'PEGUEI&PAGUEI';
   return `${prefix}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 }
 
