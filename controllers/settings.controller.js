@@ -13,6 +13,10 @@ const SETTINGS_KEYS = [
   'notifications',
   'security',
   'automation',
+  'users',
+  'audit',
+  'support',
+  'backup',
 ];
 
 const DEFAULT_WHATSAPP_TEMPLATES = [
@@ -118,12 +122,34 @@ function defaultSettings(account) {
     security: {
       requireDoubleConfirmation: true,
       sensitiveRoutesProtected: true,
+      activeSessions: [],
     },
     automation: {
       dueTomorrow: false,
       overdueBilling: false,
       paymentConfirmation: false,
       installmentReminder: false,
+    },
+    users: {
+      extraAdminsEnabled: false,
+      maxAdmins: 1,
+      pendingInvites: [],
+    },
+    audit: {
+      retentionDays: 365,
+      criticalActions: true,
+      exportEnabled: true,
+    },
+    support: {
+      enabled: true,
+      realtimeEnabled: true,
+      soundEnabled: false,
+      defaultStatus: 'OPEN',
+    },
+    backup: {
+      autoBackupEnabled: false,
+      lastBackupAt: null,
+      restoreEnabled: true,
     },
   };
 }
