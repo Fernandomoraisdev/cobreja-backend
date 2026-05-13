@@ -20,8 +20,8 @@ function onlyDigits(value) {
 
 function splitName(name) {
   const parts = String(name || 'Cliente').trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return { firstName: 'Cliente', lastName: 'PEGUEI&PAGUEI' };
-  if (parts.length === 1) return { firstName: parts[0], lastName: 'PEGUEI&PAGUEI' };
+  if (!parts.length) return { firstName: 'Cliente', lastName: 'Peguei & Paguei' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: 'Peguei & Paguei' };
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
 }
 
@@ -453,7 +453,7 @@ async function createInstallmentPix(req, res) {
 
     const mpPayment = await createPixPayment({
       amount: remaining,
-      description: `PEGUEI&PAGUEI - Parcela ${installment.installmentNumber}`,
+      description: `Peguei & Paguei - Parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
       accessToken: mercadoPagoCredentials.accessToken,
@@ -631,7 +631,7 @@ async function createInstallmentAnticipationPix(req, res) {
 
     const mpPayment = await createPixPayment({
       amount: quote.anticipatedAmount,
-      description: `PEGUEI&PAGUEI - Antecipacao parcela ${installment.installmentNumber}`,
+      description: `Peguei & Paguei - Antecipacao parcela ${installment.installmentNumber}`,
       externalReference,
       idempotencyKey,
       accessToken: mercadoPagoCredentials.accessToken,

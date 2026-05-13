@@ -33,7 +33,7 @@ function latestMessage(conversation) {
 function buildAdminSupportNotification({ conversation, message, settings }) {
   const clientName = conversation.client?.name || 'Cliente';
   const subject = conversation.subject || 'Suporte';
-  const companyName = settings?.company?.name || 'PEGUEI&PAGUEI';
+  const companyName = settings?.company?.name || 'Peguei & Paguei';
   const adminPhone =
     settings?.whatsapp?.adminPhone ||
     settings?.company?.phone ||

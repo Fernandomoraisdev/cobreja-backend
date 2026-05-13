@@ -530,7 +530,7 @@ app.post('/client-register', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Backend Cobreja rodando');
+  res.send('Backend Peguei & Paguei rodando');
 });
 
 const port = Number(process.env.PORT || 3000);

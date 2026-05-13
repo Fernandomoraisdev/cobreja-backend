@@ -55,7 +55,7 @@ const DEFAULT_WHATSAPP_TEMPLATES = [
 function defaultSettings(account) {
   return {
     company: {
-      name: account?.name || 'PEGUEI&PAGUEI',
+      name: account?.name || 'Peguei & Paguei',
       logoUrl: null,
       faviconUrl: null,
       cnpj: null,
@@ -106,7 +106,7 @@ function defaultSettings(account) {
     },
     appearance: {
       theme: 'dark',
-      accentColor: 'cobreja',
+      accentColor: 'peguei_paguei',
       compactLayout: false,
     },
     notifications: {

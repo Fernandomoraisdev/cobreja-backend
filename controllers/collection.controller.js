@@ -104,7 +104,7 @@ function buildCollectionMessage({ client, installment, remaining, daysLate, sett
   const name = String(client?.name || 'cliente').trim();
   const dueDate = formatDate(installment.dueDate);
   const amount = formatMoney(remaining);
-  const companyName = String(settings?.company?.name || 'PEGUEI&PAGUEI').trim();
+  const companyName = String(settings?.company?.name || 'Peguei & Paguei').trim();
   const template = templateForType(settings, type);
 
   if (template) {
