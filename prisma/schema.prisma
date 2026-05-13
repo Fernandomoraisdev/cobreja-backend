@@ -128,6 +128,10 @@ model Plan {
   priceCents      Int      @default(0)
   currency        String   @default("BRL")
   clientLimit     Int?
+  billingPeriod   String   @default("MONTHLY")
+  periodMonths    Int      @default(1)
+  sortOrder       Int      @default(0)
+  isPublic        Boolean  @default(true)
   features        Json     @default("[]")
   isActive        Boolean  @default(true)
 

@@ -39,7 +39,7 @@ async function selectSaasPlan(req, res) {
     const subscription = await changeAccountPlan({
       accountId: req.user.accountId,
       planCode,
-      status: planCode === 'FREE' ? 'TRIAL' : 'ACTIVE',
+      status: 'ACTIVE',
     });
 
     await writeAuditLog({

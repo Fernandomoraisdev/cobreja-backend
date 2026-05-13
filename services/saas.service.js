@@ -3,54 +3,98 @@ const prisma = require('../prisma');
 const DEFAULT_PLANS = [
   {
     code: 'FREE',
-    name: 'Gratis',
-    description: 'Plano inicial para validar a operacao com limite reduzido.',
+    name: 'Grátis',
+    description: 'Plano gratuito para começar a operar com limite reduzido.',
     priceCents: 0,
-    clientLimit: 20,
+    clientLimit: 10,
+    billingPeriod: 'FREE',
+    periodMonths: 0,
+    sortOrder: 0,
     features: [
-      'Ate 20 clientes ativos',
-      'Controle de dividas e parcelas',
+      'Até 10 clientes ativos',
+      'Controle de dívidas e parcelas',
       'Portal do cliente',
-      'Pix por parcela',
+      'Pix por parcela em sandbox',
     ],
   },
   {
-    code: 'STARTER',
-    name: 'Starter',
-    description: 'Plano para carteiras em crescimento.',
-    priceCents: 4900,
+    code: 'MENSAL',
+    name: 'Mensal',
+    description: 'Plano mensal para carteiras em crescimento.',
+    priceCents: 5990,
     clientLimit: 100,
+    billingPeriod: 'MONTHLY',
+    periodMonths: 1,
+    sortOrder: 10,
     features: [
-      'Ate 100 clientes ativos',
+      'Até 100 clientes ativos',
       'Dashboard financeiro',
-      'Automacoes manuais de cobranca',
+      'Automações manuais de cobrança',
       'Suporte integrado',
     ],
   },
   {
-    code: 'PRO',
-    name: 'Pro',
-    description: 'Plano profissional para operacao recorrente.',
-    priceCents: 9900,
-    clientLimit: 500,
+    code: 'TRIMESTRAL',
+    name: 'Trimestral',
+    description: 'Plano trimestral com mais limite e melhor custo-benefício.',
+    priceCents: 15990,
+    clientLimit: 250,
+    billingPeriod: 'QUARTERLY',
+    periodMonths: 3,
+    sortOrder: 20,
     features: [
-      'Ate 500 clientes ativos',
+      'Até 250 clientes ativos',
       'Mercado Pago Pix',
       'Auditoria',
-      'Relatorios avancados',
+      'Relatórios avançados',
     ],
   },
   {
-    code: 'BUSINESS',
-    name: 'Business',
-    description: 'Plano para carteiras maiores e operacao SaaS completa.',
-    priceCents: 19900,
+    code: 'SEMESTRAL',
+    name: 'Semestral',
+    description: 'Plano semestral para operação profissional recorrente.',
+    priceCents: 29990,
+    clientLimit: 500,
+    billingPeriod: 'SEMIANNUAL',
+    periodMonths: 6,
+    sortOrder: 30,
+    features: [
+      'Até 500 clientes ativos',
+      'Pix Mercado Pago',
+      'Suporte integrado',
+      'Auditoria e relatórios',
+    ],
+  },
+  {
+    code: 'ANUAL',
+    name: 'Anual',
+    description: 'Plano anual para carteiras maiores e operação SaaS completa.',
+    priceCents: 49990,
     clientLimit: null,
+    billingPeriod: 'YEARLY',
+    periodMonths: 12,
+    sortOrder: 40,
     features: [
       'Clientes ilimitados',
-      'Prioridade em automacoes',
-      'Estrutura multi-conta',
+      'Prioridade em automações',
+      'Dashboard premium',
       'Preparado para WhatsApp Business API',
+    ],
+  },
+  {
+    code: 'VITALICIO',
+    name: 'Vitalício',
+    description: 'Plano de pagamento único para uso contínuo da plataforma.',
+    priceCents: 149990,
+    clientLimit: null,
+    billingPeriod: 'LIFETIME',
+    periodMonths: 0,
+    sortOrder: 50,
+    features: [
+      'Clientes ilimitados',
+      'Acesso vitalício aos recursos SaaS',
+      'Pix Mercado Pago',
+      'Auditoria, suporte e automações',
     ],
   },
 ];
@@ -59,6 +103,18 @@ function addDays(date, days) {
   const result = new Date(date);
   result.setDate(result.getDate() + days);
   return result;
+}
+
+function addMonths(date, months) {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + months);
+  return result;
+}
+
+function getPeriodEnd(plan) {
+  const months = Number(plan?.periodMonths || 0);
+  if (!months) return null;
+  return addMonths(new Date(), months);
 }
 
 function serializePlan(plan) {
@@ -71,6 +127,10 @@ function serializePlan(plan) {
     priceCents: plan.priceCents,
     currency: plan.currency,
     clientLimit: plan.clientLimit,
+    billingPeriod: plan.billingPeriod,
+    periodMonths: plan.periodMonths,
+    sortOrder: plan.sortOrder,
+    isPublic: plan.isPublic,
     features: Array.isArray(plan.features) ? plan.features : [],
     isActive: plan.isActive,
   };
@@ -93,6 +153,7 @@ function serializeSubscription(subscription) {
 
 async function ensureDefaultPlans() {
   const plans = [];
+  const activeCodes = DEFAULT_PLANS.map((plan) => plan.code);
   for (const plan of DEFAULT_PLANS) {
     const saved = await prisma.plan.upsert({
       where: { code: plan.code },
@@ -102,6 +163,10 @@ async function ensureDefaultPlans() {
         priceCents: plan.priceCents,
         currency: 'BRL',
         clientLimit: plan.clientLimit,
+        billingPeriod: plan.billingPeriod,
+        periodMonths: plan.periodMonths,
+        sortOrder: plan.sortOrder,
+        isPublic: true,
         features: plan.features,
         isActive: true,
       },
@@ -112,12 +177,27 @@ async function ensureDefaultPlans() {
         priceCents: plan.priceCents,
         currency: 'BRL',
         clientLimit: plan.clientLimit,
+        billingPeriod: plan.billingPeriod,
+        periodMonths: plan.periodMonths,
+        sortOrder: plan.sortOrder,
+        isPublic: true,
         features: plan.features,
         isActive: true,
       },
     });
     plans.push(saved);
   }
+
+  await prisma.plan.updateMany({
+    where: {
+      AND: [
+        { code: { notIn: activeCodes } },
+        { code: { in: ['STARTER', 'PRO', 'BUSINESS', 'LIFETIME'] } },
+      ],
+    },
+    data: { isActive: false, isPublic: false },
+  });
+
   return plans;
 }
 
@@ -148,9 +228,9 @@ async function ensureAccountSubscription(accountId) {
   const freePlan = await prisma.plan.findUnique({ where: { code: 'FREE' } });
   return prisma.subscription.create({
     data: {
-      status: 'TRIAL',
-      trialEndsAt: addDays(new Date(), 14),
-      currentPeriodEnd: addDays(new Date(), 14),
+      status: 'ACTIVE',
+      trialEndsAt: null,
+      currentPeriodEnd: null,
       accountId,
       planId: freePlan.id,
     },
@@ -169,7 +249,10 @@ async function getSaasOverview(accountId) {
   const remainingClients = limit == null ? null : Math.max(limit - activeClients, 0);
 
   return {
-    plans: plans.map(serializePlan).sort((left, right) => left.priceCents - right.priceCents),
+    plans: plans
+      .map(serializePlan)
+      .filter((plan) => plan.isActive && plan.isPublic)
+      .sort((left, right) => left.sortOrder - right.sortOrder),
     subscription: serializeSubscription(subscription),
     usage: {
       activeClients,
@@ -197,6 +280,21 @@ async function changeAccountPlan({ accountId, planCode, status = 'ACTIVE' }) {
     throw err;
   }
 
+  const activeClients = await getActiveClientCount(accountId);
+  if (plan.clientLimit != null && activeClients > plan.clientLimit) {
+    const err = new Error(
+      `Este plano permite ${plan.clientLimit} cliente(s) ativo(s), mas esta conta possui ${activeClients}. Escolha um plano maior ou arquive clientes antes de reduzir o plano.`,
+    );
+    err.statusCode = 409;
+    err.code = 'PLAN_LIMIT_TOO_LOW';
+    err.data = {
+      activeClients,
+      clientLimit: plan.clientLimit,
+      plan: serializePlan(plan),
+    };
+    throw err;
+  }
+
   await prisma.subscription.updateMany({
     where: {
       accountId,
@@ -208,7 +306,8 @@ async function changeAccountPlan({ accountId, planCode, status = 'ACTIVE' }) {
   return prisma.subscription.create({
     data: {
       status,
-      currentPeriodEnd: addDays(new Date(), 30),
+      trialEndsAt: null,
+      currentPeriodEnd: getPeriodEnd(plan),
       accountId,
       planId: plan.id,
     },
