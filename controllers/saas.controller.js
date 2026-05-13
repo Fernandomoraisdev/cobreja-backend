@@ -76,6 +76,41 @@ async function getSaasStatus(req, res) {
   }
 }
 
+async function listSaasPlanPayments(req, res) {
+  try {
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Apenas ADMIN pode consultar faturas do plano', data: [] });
+    }
+
+    const intents = await prisma.saasPaymentIntent.findMany({
+      where: { accountId: req.user.accountId },
+      include: { plan: true, subscription: true },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+
+    return res.json({
+      message: 'Faturas do plano carregadas',
+      data: intents.map((intent) => ({
+        ...serializeSaasIntent(intent),
+        subscription: intent.subscription
+          ? {
+              id: intent.subscription.id,
+              status: intent.subscription.status,
+              currentPeriodEnd: intent.subscription.currentPeriodEnd,
+            }
+          : null,
+      })),
+    });
+  } catch (err) {
+    console.error('Erro ao carregar faturas SaaS:', err);
+    return res.status(500).json({
+      message: err.message || 'Erro ao carregar faturas do plano',
+      data: [],
+    });
+  }
+}
+
 async function selectSaasPlan(req, res) {
   try {
     if (req.user.role !== 'ADMIN') {
@@ -303,5 +338,6 @@ module.exports = {
   createSaasPlanPix,
   getSaasPlanPaymentStatus,
   getSaasStatus,
+  listSaasPlanPayments,
   selectSaasPlan,
 };

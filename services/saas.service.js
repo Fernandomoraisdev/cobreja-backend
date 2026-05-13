@@ -338,7 +338,9 @@ async function getSaasOverview(accountId) {
       status: intent.status,
       amount: intent.amount,
       currency: intent.currency,
+      externalReference: intent.externalReference,
       mercadoPagoPaymentId: intent.mercadoPagoPaymentId,
+      ticketUrl: intent.ticketUrl,
       paidAt: intent.paidAt,
       createdAt: intent.createdAt,
       plan: intent.plan
