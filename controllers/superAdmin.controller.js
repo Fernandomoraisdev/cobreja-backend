@@ -1,5 +1,10 @@
 const prisma = require('../prisma');
-const { changeAccountPlan, serializeSubscription } = require('../services/saas.service');
+const {
+  buildBillingStatus,
+  changeAccountPlan,
+  renewAccountSubscription,
+  serializeSubscription,
+} = require('../services/saas.service');
 const { writeAuditLog } = require('../services/audit.service');
 const { signAuthToken } = require('../utils/auth');
 
@@ -32,6 +37,7 @@ function serializeAccount(account) {
       supportConversations: account._count?.supportConversations || 0,
     },
     subscription: serializeSubscription(subscription),
+    billing: buildBillingStatus(subscription),
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   };
@@ -48,7 +54,12 @@ function centsToCurrency(value) {
 
 function calculateRecurringRevenue(subscriptions) {
   const monthly = subscriptions.reduce((sum, subscription) => {
-    return sum + centsToCurrency(subscription.plan?.priceCents || 0);
+    const plan = subscription.plan || {};
+    const price = centsToCurrency(plan.priceCents || 0);
+    const periodMonths = Number(plan.periodMonths || 1);
+    const billingPeriod = String(plan.billingPeriod || '').toUpperCase();
+    if (price <= 0 || billingPeriod === 'FREE' || billingPeriod === 'LIFETIME') return sum;
+    return sum + (price / Math.max(periodMonths, 1));
   }, 0);
   return {
     mrr: monthly,
@@ -133,6 +144,7 @@ async function getSuperAdminOverview(req, res) {
     clients,
     activeSubscriptions,
     activeSubscriptionRows,
+    pastDueSubscriptions,
     suspendedSettings,
     paymentStats,
     paymentTodayStats,
@@ -151,6 +163,7 @@ async function getSuperAdminOverview(req, res) {
       where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } },
       include: { plan: true },
     }),
+    prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
     prisma.accountSettings.count({
       where: {
         saas: {
@@ -218,6 +231,7 @@ async function getSuperAdminOverview(req, res) {
         users,
         clients,
         activeSubscriptions,
+        pastDueSubscriptions,
         suspendedAccounts: suspendedSettings,
         supportOpen,
         paymentsCount: paymentStats._count.id,
@@ -294,6 +308,7 @@ async function listSuperAdminSubscriptions(req, res) {
     message: 'Assinaturas carregadas',
     data: subscriptions.map((subscription) => ({
       ...serializeSubscription(subscription),
+      billing: buildBillingStatus(subscription),
       account: subscription.account
         ? {
             id: subscription.account.id,
@@ -309,6 +324,34 @@ async function listSuperAdminSubscriptions(req, res) {
           }
         : null,
     })),
+  });
+}
+
+async function renewSuperAdminSubscription(req, res) {
+  const accountId = Number(req.params.accountId);
+  const subscriptionId = req.body.subscriptionId ? Number(req.body.subscriptionId) : null;
+  if (!accountId) {
+    return res.status(400).json({ message: 'Conta obrigatoria', data: {} });
+  }
+
+  const subscription = await renewAccountSubscription({ accountId, subscriptionId });
+
+  await writeAuditLog({
+    req,
+    action: 'SUPER_ADMIN_SUBSCRIPTION_RENEWED',
+    entity: 'Subscription',
+    entityId: subscription.id,
+    severity: 'INFO',
+    metadata: {
+      accountId,
+      planCode: subscription.plan?.code,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+    },
+  });
+
+  return res.json({
+    message: 'Assinatura renovada',
+    data: serializeSubscription(subscription),
   });
 }
 
@@ -494,5 +537,6 @@ module.exports = {
   listSuperAdminWebhooks,
   updateAccountStatus,
   changeSuperAdminAccountPlan,
+  renewSuperAdminSubscription,
   impersonateAccountAdmin,
 };

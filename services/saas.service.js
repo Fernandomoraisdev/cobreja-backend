@@ -119,6 +119,15 @@ function getPeriodEnd(plan) {
   return addMonths(new Date(), months);
 }
 
+function getRenewedPeriodEnd(plan, currentPeriodEnd) {
+  const months = Number(plan?.periodMonths || 0);
+  if (!months) return null;
+  const base = currentPeriodEnd && new Date(currentPeriodEnd).getTime() > Date.now()
+    ? new Date(currentPeriodEnd)
+    : new Date();
+  return addMonths(base, months);
+}
+
 function isFreePlan(plan) {
   return Number(plan?.priceCents || 0) <= 0 || String(plan?.billingPeriod || '') === 'FREE';
 }
@@ -408,6 +417,41 @@ async function activatePaidPlan({ accountId, planId, externalProvider, externalI
   });
 }
 
+async function renewAccountSubscription({ accountId, subscriptionId = null }) {
+  await ensureDefaultPlans();
+  const subscription = await prisma.subscription.findFirst({
+    where: {
+      accountId: Number(accountId),
+      ...(subscriptionId ? { id: Number(subscriptionId) } : { status: { in: ['ACTIVE', 'PAST_DUE'] } }),
+    },
+    include: { plan: true },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (!subscription) {
+    const err = new Error('Assinatura nao encontrada');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (isFreePlan(subscription.plan) || isLifetimePlan(subscription.plan)) {
+    return prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { status: 'ACTIVE', currentPeriodEnd: null },
+      include: { plan: true },
+    });
+  }
+
+  return prisma.subscription.update({
+    where: { id: subscription.id },
+    data: {
+      status: 'ACTIVE',
+      currentPeriodEnd: getRenewedPeriodEnd(subscription.plan, subscription.currentPeriodEnd),
+    },
+    include: { plan: true },
+  });
+}
+
 async function applySaasPaymentResult({
   mercadoPagoPaymentId,
   externalReference,
@@ -515,6 +559,8 @@ module.exports = {
   changeAccountPlan,
   activatePaidPlan,
   applySaasPaymentResult,
+  buildBillingStatus,
   enforceClientLimit,
+  renewAccountSubscription,
   serializeSubscription,
 };

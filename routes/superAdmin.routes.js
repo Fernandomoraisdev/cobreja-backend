@@ -11,6 +11,7 @@ const {
   listSuperAdminWebhooks,
   updateAccountStatus,
   changeSuperAdminAccountPlan,
+  renewSuperAdminSubscription,
   impersonateAccountAdmin,
 } = require('../controllers/superAdmin.controller');
 
@@ -27,6 +28,7 @@ router.get('/logs', listSuperAdminAuditLogs);
 router.get('/webhooks', listSuperAdminWebhooks);
 router.patch('/accounts/:accountId/status', updateAccountStatus);
 router.post('/accounts/:accountId/plan', changeSuperAdminAccountPlan);
+router.post('/accounts/:accountId/subscription/renew', renewSuperAdminSubscription);
 router.post('/accounts/:accountId/impersonate', impersonateAccountAdmin);
 
 module.exports = router;
