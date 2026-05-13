@@ -1,4 +1,5 @@
 const prisma = require('../prisma');
+const { buildBillingStatus } = require('../services/saas.service');
 
 function startOfDay(date = new Date()) {
   const result = new Date(date);
@@ -58,6 +59,8 @@ async function getNotificationSummary(req, res) {
       pixApprovedToday,
       invalidWebhookLogs,
       subscription,
+      saasPixPending,
+      saasPixApprovedToday,
       activeClients,
     ] = await Promise.all([
       prisma.accountSettings.findUnique({
@@ -121,6 +124,21 @@ async function getNotificationSummary(req, res) {
         include: { plan: true },
         orderBy: { updatedAt: 'desc' },
       }),
+      prisma.saasPaymentIntent.count({
+        where: {
+          accountId,
+          provider: 'MERCADO_PAGO',
+          status: { in: ['CREATED', 'PENDING', 'IN_PROCESS'] },
+        },
+      }),
+      prisma.saasPaymentIntent.count({
+        where: {
+          accountId,
+          provider: 'MERCADO_PAGO',
+          status: 'APPROVED',
+          paidAt: { gte: todayStart, lte: todayEnd },
+        },
+      }),
       prisma.client.count({
         where: { accountId, status: 'ACTIVE' },
       }),
@@ -165,17 +183,25 @@ async function getNotificationSummary(req, res) {
         }
       }
 
+      const billingStatus = buildBillingStatus(subscription, today);
       const status = String(subscription.status || '').toUpperCase();
-      const endDate = status === 'TRIAL'
-        ? subscription.trialEndsAt
-        : subscription.currentPeriodEnd;
+      const endDate = subscription.currentPeriodEnd;
       const remainingDays = daysUntil(endDate, today);
-      if (remainingDays !== null && remainingDays < 0) {
+      if (billingStatus.accessBlocked) {
+        items.push(notification({
+          type: 'SAAS_BLOCKED',
+          severity: 'ERROR',
+          title: 'Plano bloqueado',
+          message: `Plano ${subscription.plan?.name || '-'} venceu ha ${billingStatus.daysPastDue} dia(s). Renove para liberar novos cadastros.`,
+          count: 1,
+          action: 'SAAS',
+        }));
+      } else if (billingStatus.isPastDue) {
         items.push(notification({
           type: 'SAAS_EXPIRED',
           severity: 'ERROR',
-          title: status === 'TRIAL' ? 'Trial vencido' : 'Assinatura vencida',
-          message: `Plano ${subscription.plan?.name || '-'} venceu ha ${Math.abs(remainingDays)} dia(s).`,
+          title: 'Assinatura vencida',
+          message: `Plano ${subscription.plan?.name || '-'} venceu ha ${billingStatus.daysPastDue} dia(s). Carencia: ${billingStatus.graceDays} dia(s).`,
           count: 1,
           action: 'SAAS',
         }));
@@ -186,6 +212,28 @@ async function getNotificationSummary(req, res) {
           title: status === 'TRIAL' ? 'Trial perto do fim' : 'Assinatura perto do fim',
           message: `Plano ${subscription.plan?.name || '-'} vence em ${remainingDays} dia(s).`,
           count: 1,
+          action: 'SAAS',
+        }));
+      }
+
+      if (saasPixPending > 0) {
+        items.push(notification({
+          type: 'SAAS_PIX_PENDING',
+          severity: 'INFO',
+          title: 'Pix do plano pendente',
+          message: `${saasPixPending} cobranca(s) do plano ainda aguardando pagamento.`,
+          count: saasPixPending,
+          action: 'SAAS',
+        }));
+      }
+
+      if (saasPixApprovedToday > 0) {
+        items.push(notification({
+          type: 'SAAS_PIX_APPROVED_TODAY',
+          severity: 'SUCCESS',
+          title: 'Plano pago hoje',
+          message: `${saasPixApprovedToday} pagamento(s) de plano confirmado(s) hoje.`,
+          count: saasPixApprovedToday,
           action: 'SAAS',
         }));
       }
