@@ -6,6 +6,7 @@ const {
   listSuperAdminAccounts,
   listSuperAdminSubscriptions,
   listSuperAdminPayments,
+  listSuperAdminSaasPayments,
   listSuperAdminSupport,
   listSuperAdminAuditLogs,
   listSuperAdminWebhooks,
@@ -23,6 +24,7 @@ router.get('/overview', getSuperAdminOverview);
 router.get('/accounts', listSuperAdminAccounts);
 router.get('/subscriptions', listSuperAdminSubscriptions);
 router.get('/payments', listSuperAdminPayments);
+router.get('/saas-payments', listSuperAdminSaasPayments);
 router.get('/support', listSuperAdminSupport);
 router.get('/logs', listSuperAdminAuditLogs);
 router.get('/webhooks', listSuperAdminWebhooks);

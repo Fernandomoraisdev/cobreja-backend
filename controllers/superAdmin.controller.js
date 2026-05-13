@@ -136,6 +136,39 @@ function serializeWebhookLog(log) {
   };
 }
 
+function serializeSaasPaymentIntent(intent) {
+  return {
+    id: intent.id,
+    provider: intent.provider,
+    status: intent.status,
+    amount: intent.amount,
+    currency: intent.currency,
+    externalReference: intent.externalReference,
+    mercadoPagoPaymentId: intent.mercadoPagoPaymentId,
+    paidAt: intent.paidAt,
+    createdAt: intent.createdAt,
+    updatedAt: intent.updatedAt,
+    plan: intent.plan
+      ? {
+          id: intent.plan.id,
+          code: intent.plan.code,
+          name: intent.plan.name,
+          billingPeriod: intent.plan.billingPeriod,
+        }
+      : null,
+    subscription: intent.subscription
+      ? {
+          id: intent.subscription.id,
+          status: intent.subscription.status,
+          currentPeriodEnd: intent.subscription.currentPeriodEnd,
+        }
+      : null,
+    account: intent.account
+      ? { id: intent.account.id, name: intent.account.name }
+      : null,
+  };
+}
+
 async function getSuperAdminOverview(req, res) {
   const today = startOfToday();
   const [
@@ -148,6 +181,9 @@ async function getSuperAdminOverview(req, res) {
     suspendedSettings,
     paymentStats,
     paymentTodayStats,
+    saasPaymentStats,
+    saasPaymentTodayStats,
+    saasPaymentPending,
     pixProcessed,
     activeDebts,
     overdueDebts,
@@ -180,6 +216,19 @@ async function getSuperAdminOverview(req, res) {
       where: { paidAt: { gte: today } },
       _sum: { amount: true },
       _count: { id: true },
+    }),
+    prisma.saasPaymentIntent.aggregate({
+      where: { status: 'APPROVED' },
+      _sum: { amount: true },
+      _count: { id: true },
+    }),
+    prisma.saasPaymentIntent.aggregate({
+      where: { status: 'APPROVED', paidAt: { gte: today } },
+      _sum: { amount: true },
+      _count: { id: true },
+    }),
+    prisma.saasPaymentIntent.count({
+      where: { status: { in: ['CREATED', 'PENDING', 'IN_PROCESS'] } },
     }),
     prisma.paymentIntent.count({
       where: { status: { in: ['APPROVED', 'PAID', 'CONFIRMED'] } },
@@ -238,6 +287,11 @@ async function getSuperAdminOverview(req, res) {
         paymentsAmount: paymentStats._sum.amount || 0,
         paymentsToday: paymentTodayStats._count.id,
         paymentsTodayAmount: paymentTodayStats._sum.amount || 0,
+        saasPaymentsCount: saasPaymentStats._count.id,
+        saasPaymentsAmount: saasPaymentStats._sum.amount || 0,
+        saasPaymentsToday: saasPaymentTodayStats._count.id,
+        saasPaymentsTodayAmount: saasPaymentTodayStats._sum.amount || 0,
+        saasPaymentsPending,
         pixProcessed,
         activeDebts,
         overdueDebts,
@@ -368,6 +422,23 @@ async function listSuperAdminPayments(req, res) {
   return res.json({
     message: 'Pagamentos globais carregados',
     data: payments.map(serializePayment),
+  });
+}
+
+async function listSuperAdminSaasPayments(req, res) {
+  const intents = await prisma.saasPaymentIntent.findMany({
+    include: {
+      account: true,
+      plan: true,
+      subscription: true,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Cobrancas SaaS carregadas',
+    data: intents.map(serializeSaasPaymentIntent),
   });
 }
 
@@ -532,6 +603,7 @@ module.exports = {
   listSuperAdminAccounts,
   listSuperAdminSubscriptions,
   listSuperAdminPayments,
+  listSuperAdminSaasPayments,
   listSuperAdminSupport,
   listSuperAdminAuditLogs,
   listSuperAdminWebhooks,
