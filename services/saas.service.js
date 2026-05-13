@@ -1,5 +1,7 @@
 const prisma = require('../prisma');
 
+const DEFAULT_SAAS_GRACE_DAYS = Number(process.env.SAAS_GRACE_DAYS || 3);
+
 const DEFAULT_PLANS = [
   {
     code: 'FREE',
@@ -121,6 +123,61 @@ function isFreePlan(plan) {
   return Number(plan?.priceCents || 0) <= 0 || String(plan?.billingPeriod || '') === 'FREE';
 }
 
+function isLifetimePlan(plan) {
+  return String(plan?.billingPeriod || '').toUpperCase() === 'LIFETIME';
+}
+
+function startOfDay(date = new Date()) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function diffDays(from, to = new Date()) {
+  return Math.floor((startOfDay(to).getTime() - startOfDay(from).getTime()) / 86400000);
+}
+
+function buildBillingStatus(subscription, now = new Date()) {
+  const plan = subscription?.plan;
+  const end = subscription?.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
+  const freeOrLifetime = !plan || isFreePlan(plan) || isLifetimePlan(plan);
+  const isExpired = Boolean(end && end.getTime() < now.getTime());
+  const daysPastDue = isExpired ? Math.max(diffDays(end, now), 0) : 0;
+  const isPastDue = subscription?.status === 'PAST_DUE' || (isExpired && !freeOrLifetime);
+  const accessBlocked = isPastDue && daysPastDue > DEFAULT_SAAS_GRACE_DAYS;
+
+  return {
+    status: subscription?.status || 'ACTIVE',
+    isPaidPlan: Boolean(plan && !freeOrLifetime),
+    isPastDue,
+    isExpired,
+    daysPastDue,
+    graceDays: DEFAULT_SAAS_GRACE_DAYS,
+    accessBlocked,
+    renewRequired: isPastDue,
+    currentPeriodEnd: subscription?.currentPeriodEnd || null,
+  };
+}
+
+async function refreshSubscriptionStatus(subscription) {
+  if (!subscription) return subscription;
+  const billing = buildBillingStatus(subscription);
+  if (
+    billing.isPastDue &&
+    subscription.status === 'ACTIVE' &&
+    subscription.currentPeriodEnd &&
+    !isFreePlan(subscription.plan) &&
+    !isLifetimePlan(subscription.plan)
+  ) {
+    return prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { status: 'PAST_DUE' },
+      include: { plan: true },
+    });
+  }
+  return subscription;
+}
+
 function serializePlan(plan) {
   if (!plan) return null;
   return {
@@ -227,7 +284,7 @@ async function ensureAccountSubscription(accountId) {
     orderBy: { createdAt: 'desc' },
   });
 
-  if (existing) return existing;
+  if (existing) return refreshSubscriptionStatus(existing);
 
   const freePlan = await prisma.plan.findUnique({ where: { code: 'FREE' } });
   return prisma.subscription.create({
@@ -249,7 +306,9 @@ async function getSaasOverview(accountId) {
     getActiveClientCount(accountId),
   ]);
 
-  const limit = subscription.plan.clientLimit;
+  const refreshedSubscription = await refreshSubscriptionStatus(subscription);
+  const billing = buildBillingStatus(refreshedSubscription);
+  const limit = refreshedSubscription.plan.clientLimit;
   const remainingClients = limit == null ? null : Math.max(limit - activeClients, 0);
 
   return {
@@ -257,7 +316,8 @@ async function getSaasOverview(accountId) {
       .map(serializePlan)
       .filter((plan) => plan.isActive && plan.isPublic)
       .sort((left, right) => left.sortOrder - right.sortOrder),
-    subscription: serializeSubscription(subscription),
+    subscription: serializeSubscription(refreshedSubscription),
+    billing,
     usage: {
       activeClients,
       clientLimit: limit,
@@ -424,6 +484,16 @@ async function applySaasPaymentResult({
 
 async function enforceClientLimit(accountId) {
   const overview = await getSaasOverview(accountId);
+  if (overview.billing?.accessBlocked) {
+    const err = new Error(
+      'Assinatura vencida. Renove o plano para cadastrar novos clientes.',
+    );
+    err.statusCode = 402;
+    err.code = 'SAAS_SUBSCRIPTION_BLOCKED';
+    err.data = overview;
+    throw err;
+  }
+
   if (!overview.usage.limitReached) return overview;
 
   const planName = overview.subscription?.plan?.name || 'atual';

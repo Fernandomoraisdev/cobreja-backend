@@ -98,8 +98,8 @@ function defaultSettings(account) {
       billingAutomationEnabled: false,
     },
     saas: {
-      currentPlan: 'TRIAL',
-      trial: true,
+      currentPlan: 'FREE',
+      trial: false,
       subscriptionEndsAt: null,
       clientLimit: null,
       upgradeUrl: null,
