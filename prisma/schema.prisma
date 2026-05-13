@@ -90,6 +90,7 @@ model Account {
   debts          Debt[]
   payments       Payment[]
   paymentIntents PaymentIntent[]
+  saasPaymentIntents SaasPaymentIntent[]
   webhookLogs    WebhookLog[]
   renegotiations Renegotiation[]
   installments   Installment[]
@@ -136,6 +137,7 @@ model Plan {
   isActive        Boolean  @default(true)
 
   subscriptions   Subscription[]
+  saasPaymentIntents SaasPaymentIntent[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
@@ -154,11 +156,47 @@ model Subscription {
 
   accountId       Int
   account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  saasPaymentIntents SaasPaymentIntent[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
 
   @@index([accountId, status])
+}
+
+model SaasPaymentIntent {
+  id                    Int      @id @default(autoincrement())
+  provider              String   @default("MERCADO_PAGO")
+  status                String   @default("CREATED")
+  amount                Float
+  currency              String   @default("BRL")
+  externalReference     String   @unique
+  idempotencyKey        String   @unique
+  mercadoPagoPaymentId  String?  @unique
+  qrCode                String?
+  qrCodeBase64          String?
+  ticketUrl             String?
+  rawResponse           Json?
+  rawWebhook            Json?
+  paidAt                DateTime?
+  expiresAt             DateTime?
+  lastCheckedAt         DateTime?
+
+  planId          Int
+  plan            Plan          @relation(fields: [planId], references: [id])
+
+  subscriptionId  Int?
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  accountId       Int
+  account         Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status])
+  @@index([planId, status])
+  @@index([subscriptionId, status])
 }
 
 model AuditLog {

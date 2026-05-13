@@ -13,6 +13,7 @@ const {
   searchPayments,
   validateWebhookSignature,
 } = require('../services/mercadopago.service');
+const { applySaasPaymentResult } = require('../services/saas.service');
 
 function onlyDigits(value) {
   return String(value || '').replace(/\D+/g, '');
@@ -932,8 +933,19 @@ async function mercadoPagoWebhook(req, res) {
         select: { id: true, accountId: true },
       })
     : null;
+  const knownSaasIntent = !knownIntent && initialResourceId
+    ? await prisma.saasPaymentIntent.findFirst({
+        where: {
+          provider: 'MERCADO_PAGO',
+          mercadoPagoPaymentId: String(initialResourceId),
+        },
+        select: { id: true, accountId: true },
+      })
+    : null;
   const mercadoPagoCredentials = knownIntent
     ? await getMercadoPagoCredentialsForAccount(knownIntent.accountId)
+    : knownSaasIntent
+      ? await getMercadoPagoCredentialsForAccount(null)
     : await getMercadoPagoCredentialsForAccount(null);
   const validation = validateWebhookSignature({
     headers: req.headers,
@@ -950,7 +962,7 @@ async function mercadoPagoWebhook(req, res) {
       eventType: eventType ? String(eventType) : null,
       eventId: payload?.id ? String(payload.id) : null,
       resourceId: resourceId ? String(resourceId) : null,
-      accountId: knownIntent?.accountId || null,
+      accountId: knownIntent?.accountId || knownSaasIntent?.accountId || null,
       signatureValid: validation.valid,
       headers: {
         'x-signature': req.headers['x-signature'] || null,
@@ -978,7 +990,17 @@ async function mercadoPagoWebhook(req, res) {
     const mpPayment = await getPayment(resourceId, {
       accessToken: mercadoPagoCredentials.accessToken,
     });
-    const result = await applyApprovedPayment(mpPayment, { rawWebhook: payload });
+    let result = await applyApprovedPayment(mpPayment, { rawWebhook: payload });
+    if (result.reason === 'PAYMENT_INTENT_NOT_FOUND') {
+      result = await applySaasPaymentResult({
+        mercadoPagoPaymentId: mpPayment.id,
+        externalReference: mpPayment.external_reference,
+        status: mapPaymentStatus(mpPayment.status),
+        rawResponse: mpPayment,
+        rawWebhook: payload,
+        paidAt: mpPayment.date_approved ? new Date(mpPayment.date_approved) : undefined,
+      });
+    }
 
     await prisma.webhookLog.update({
       where: { id: log.id },
@@ -986,6 +1008,8 @@ async function mercadoPagoWebhook(req, res) {
         processed: true,
         accountId: result.intentId
           ? (await prisma.paymentIntent.findUnique({ where: { id: result.intentId } }))?.accountId
+          : result.saasIntentId
+            ? (await prisma.saasPaymentIntent.findUnique({ where: { id: result.saasIntentId } }))?.accountId
           : null,
       },
     });

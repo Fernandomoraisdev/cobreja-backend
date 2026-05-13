@@ -117,6 +117,10 @@ function getPeriodEnd(plan) {
   return addMonths(new Date(), months);
 }
 
+function isFreePlan(plan) {
+  return Number(plan?.priceCents || 0) <= 0 || String(plan?.billingPeriod || '') === 'FREE';
+}
+
 function serializePlan(plan) {
   if (!plan) return null;
   return {
@@ -265,7 +269,13 @@ async function getSaasOverview(accountId) {
   };
 }
 
-async function changeAccountPlan({ accountId, planCode, status = 'ACTIVE' }) {
+async function changeAccountPlan({
+  accountId,
+  planCode,
+  status = 'ACTIVE',
+  externalProvider = null,
+  externalId = null,
+}) {
   await ensureDefaultPlans();
   const plan = await prisma.plan.findFirst({
     where: {
@@ -308,11 +318,108 @@ async function changeAccountPlan({ accountId, planCode, status = 'ACTIVE' }) {
       status,
       trialEndsAt: null,
       currentPeriodEnd: getPeriodEnd(plan),
+      externalProvider,
+      externalId,
       accountId,
       planId: plan.id,
     },
     include: { plan: true },
   });
+}
+
+async function activatePaidPlan({ accountId, planId, externalProvider, externalId }) {
+  await ensureDefaultPlans();
+  const plan = await prisma.plan.findFirst({
+    where: { id: Number(planId), isActive: true },
+  });
+
+  if (!plan) {
+    const err = new Error('Plano nao encontrado');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return changeAccountPlan({
+    accountId,
+    planCode: plan.code,
+    status: isFreePlan(plan) ? 'ACTIVE' : 'ACTIVE',
+    externalProvider,
+    externalId,
+  });
+}
+
+async function applySaasPaymentResult({
+  mercadoPagoPaymentId,
+  externalReference,
+  status,
+  rawResponse,
+  rawWebhook,
+  paidAt,
+}) {
+  const intent = await prisma.saasPaymentIntent.findFirst({
+    where: {
+      OR: [
+        ...(mercadoPagoPaymentId ? [{ mercadoPagoPaymentId: String(mercadoPagoPaymentId) }] : []),
+        ...(externalReference ? [{ externalReference: String(externalReference) }] : []),
+      ],
+    },
+    include: { plan: true },
+  });
+
+  if (!intent) {
+    return { applied: false, reason: 'SAAS_PAYMENT_INTENT_NOT_FOUND' };
+  }
+
+  if (status !== 'APPROVED') {
+    await prisma.saasPaymentIntent.update({
+      where: { id: intent.id },
+      data: {
+        status,
+        mercadoPagoPaymentId: mercadoPagoPaymentId ? String(mercadoPagoPaymentId) : intent.mercadoPagoPaymentId,
+        rawResponse,
+        rawWebhook: rawWebhook || intent.rawWebhook,
+        lastCheckedAt: new Date(),
+      },
+    });
+    return { applied: false, reason: `STATUS_${status}`, saasIntentId: intent.id };
+  }
+
+  if (intent.subscriptionId && intent.status === 'APPROVED') {
+    return {
+      applied: false,
+      reason: 'ALREADY_APPLIED',
+      saasIntentId: intent.id,
+      subscriptionId: intent.subscriptionId,
+    };
+  }
+
+  const approvedAt = paidAt || new Date();
+  const subscription = await activatePaidPlan({
+    accountId: intent.accountId,
+    planId: intent.planId,
+    externalProvider: 'MERCADO_PAGO',
+    externalId: mercadoPagoPaymentId ? String(mercadoPagoPaymentId) : intent.mercadoPagoPaymentId,
+  });
+
+  await prisma.saasPaymentIntent.update({
+    where: { id: intent.id },
+    data: {
+      status: 'APPROVED',
+      mercadoPagoPaymentId: mercadoPagoPaymentId ? String(mercadoPagoPaymentId) : intent.mercadoPagoPaymentId,
+      rawResponse,
+      rawWebhook: rawWebhook || intent.rawWebhook,
+      paidAt: approvedAt,
+      subscriptionId: subscription.id,
+      lastCheckedAt: new Date(),
+    },
+  });
+
+  return {
+    applied: true,
+    saasIntentId: intent.id,
+    subscriptionId: subscription.id,
+    accountId: intent.accountId,
+  };
 }
 
 async function enforceClientLimit(accountId) {
@@ -336,6 +443,8 @@ module.exports = {
   ensureAccountSubscription,
   getSaasOverview,
   changeAccountPlan,
+  activatePaidPlan,
+  applySaasPaymentResult,
   enforceClientLimit,
   serializeSubscription,
 };
