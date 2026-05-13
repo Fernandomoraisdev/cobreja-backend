@@ -309,10 +309,16 @@ async function ensureAccountSubscription(accountId) {
 }
 
 async function getSaasOverview(accountId) {
-  const [plans, subscription, activeClients] = await Promise.all([
+  const [plans, subscription, activeClients, planPayments] = await Promise.all([
     ensureDefaultPlans(),
     ensureAccountSubscription(accountId),
     getActiveClientCount(accountId),
+    prisma.saasPaymentIntent.findMany({
+      where: { accountId: Number(accountId) },
+      include: { plan: true },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    }),
   ]);
 
   const refreshedSubscription = await refreshSubscriptionStatus(subscription);
@@ -327,6 +333,23 @@ async function getSaasOverview(accountId) {
       .sort((left, right) => left.sortOrder - right.sortOrder),
     subscription: serializeSubscription(refreshedSubscription),
     billing,
+    planPayments: planPayments.map((intent) => ({
+      id: intent.id,
+      status: intent.status,
+      amount: intent.amount,
+      currency: intent.currency,
+      mercadoPagoPaymentId: intent.mercadoPagoPaymentId,
+      paidAt: intent.paidAt,
+      createdAt: intent.createdAt,
+      plan: intent.plan
+        ? {
+            id: intent.plan.id,
+            code: intent.plan.code,
+            name: intent.plan.name,
+            billingPeriod: intent.plan.billingPeriod,
+          }
+        : null,
+    })),
     usage: {
       activeClients,
       clientLimit: limit,
