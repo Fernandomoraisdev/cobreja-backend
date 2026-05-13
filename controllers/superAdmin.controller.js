@@ -37,20 +37,120 @@ function serializeAccount(account) {
   };
 }
 
+function startOfToday() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function centsToCurrency(value) {
+  return Number(value || 0) / 100;
+}
+
+function calculateRecurringRevenue(subscriptions) {
+  const monthly = subscriptions.reduce((sum, subscription) => {
+    return sum + centsToCurrency(subscription.plan?.priceCents || 0);
+  }, 0);
+  return {
+    mrr: monthly,
+    arr: monthly * 12,
+  };
+}
+
+function serializePayment(payment) {
+  return {
+    id: payment.id,
+    type: payment.type,
+    amount: payment.amount,
+    principalAmount: payment.principalAmount,
+    interestAmount: payment.interestAmount,
+    dailyAmount: payment.dailyAmount,
+    paidAt: payment.paidAt,
+    account: payment.account
+      ? { id: payment.account.id, name: payment.account.name }
+      : null,
+    client: payment.client
+      ? { id: payment.client.id, name: payment.client.name, phone: payment.client.phone }
+      : null,
+    debtId: payment.debtId,
+    installmentId: payment.installmentId,
+  };
+}
+
+function serializeSupportConversation(conversation) {
+  return {
+    id: conversation.id,
+    subject: conversation.subject,
+    status: conversation.status,
+    priority: conversation.priority,
+    lastMessageAt: conversation.lastMessageAt,
+    createdAt: conversation.createdAt,
+    account: conversation.account
+      ? { id: conversation.account.id, name: conversation.account.name }
+      : null,
+    client: conversation.client
+      ? { id: conversation.client.id, name: conversation.client.name, phone: conversation.client.phone }
+      : null,
+    messagesCount: conversation._count?.messages || 0,
+  };
+}
+
+function serializeAuditLog(log) {
+  return {
+    id: log.id,
+    action: log.action,
+    entity: log.entity,
+    entityId: log.entityId,
+    severity: log.severity,
+    metadata: log.metadata,
+    ip: log.ip,
+    userAgent: log.userAgent,
+    createdAt: log.createdAt,
+    account: log.account ? { id: log.account.id, name: log.account.name } : null,
+    user: log.user ? { id: log.user.id, name: log.user.name, email: log.user.email } : null,
+  };
+}
+
+function serializeWebhookLog(log) {
+  return {
+    id: log.id,
+    provider: log.provider,
+    eventType: log.eventType,
+    eventId: log.eventId,
+    resourceId: log.resourceId,
+    signatureValid: log.signatureValid,
+    processed: log.processed,
+    processingError: log.processingError,
+    createdAt: log.createdAt,
+    account: log.account ? { id: log.account.id, name: log.account.name } : null,
+  };
+}
+
 async function getSuperAdminOverview(req, res) {
+  const today = startOfToday();
   const [
     accounts,
     users,
     clients,
     activeSubscriptions,
+    activeSubscriptionRows,
     suspendedSettings,
     paymentStats,
+    paymentTodayStats,
+    pixProcessed,
+    activeDebts,
+    overdueDebts,
+    activeClientsWithDebt,
+    overdueClients,
     supportOpen,
   ] = await Promise.all([
     prisma.account.count(),
     prisma.user.count(),
     prisma.client.count({ where: { status: 'ACTIVE', deletedAt: null } }),
     prisma.subscription.count({ where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } } }),
+    prisma.subscription.findMany({
+      where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } },
+      include: { plan: true },
+    }),
     prisma.accountSettings.count({
       where: {
         saas: {
@@ -63,8 +163,52 @@ async function getSuperAdminOverview(req, res) {
       _sum: { amount: true },
       _count: { id: true },
     }),
+    prisma.payment.aggregate({
+      where: { paidAt: { gte: today } },
+      _sum: { amount: true },
+      _count: { id: true },
+    }),
+    prisma.paymentIntent.count({
+      where: { status: { in: ['APPROVED', 'PAID', 'CONFIRMED'] } },
+    }),
+    prisma.debt.count({
+      where: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } },
+    }),
+    prisma.debt.count({
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        principalOutstanding: { gt: 0 },
+        dueDate: { lt: today },
+      },
+    }),
+    prisma.client.count({
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        debts: { some: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } } },
+      },
+    }),
+    prisma.client.count({
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        debts: {
+          some: {
+            status: 'ACTIVE',
+            deletedAt: null,
+            principalOutstanding: { gt: 0 },
+            dueDate: { lt: today },
+          },
+        },
+      },
+    }),
     prisma.supportConversation.count({ where: { status: { in: ['OPEN', 'PENDING'] } } }),
   ]);
+  const recurring = calculateRecurringRevenue(activeSubscriptionRows);
+  const delinquencyRate = activeDebts > 0 ? Math.round((overdueDebts / activeDebts) * 100) : 0;
+  const clientDelinquencyRate =
+    activeClientsWithDebt > 0 ? Math.round((overdueClients / activeClientsWithDebt) * 100) : 0;
 
   return res.json({
     message: 'Painel SUPER ADMIN carregado',
@@ -78,6 +222,17 @@ async function getSuperAdminOverview(req, res) {
         supportOpen,
         paymentsCount: paymentStats._count.id,
         paymentsAmount: paymentStats._sum.amount || 0,
+        paymentsToday: paymentTodayStats._count.id,
+        paymentsTodayAmount: paymentTodayStats._sum.amount || 0,
+        pixProcessed,
+        activeDebts,
+        overdueDebts,
+        activeClientsWithDebt,
+        overdueClients,
+        delinquencyRate,
+        clientDelinquencyRate,
+        mrr: recurring.mrr,
+        arr: recurring.arr,
       },
     },
   });
@@ -113,6 +268,109 @@ async function listSuperAdminAccounts(req, res) {
   return res.json({
     message: 'Empresas carregadas',
     data: accounts.map(serializeAccount),
+  });
+}
+
+async function listSuperAdminSubscriptions(req, res) {
+  const subscriptions = await prisma.subscription.findMany({
+    include: {
+      plan: true,
+      account: {
+        include: {
+          users: {
+            where: { role: 'ADMIN' },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
+          settings: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Assinaturas carregadas',
+    data: subscriptions.map((subscription) => ({
+      ...serializeSubscription(subscription),
+      account: subscription.account
+        ? {
+            id: subscription.account.id,
+            name: subscription.account.name,
+            status: subscription.account.settings?.saas?.accountStatus || 'ACTIVE',
+            admin: subscription.account.users?.[0]
+              ? {
+                  id: subscription.account.users[0].id,
+                  name: subscription.account.users[0].name,
+                  email: subscription.account.users[0].email,
+                }
+              : null,
+          }
+        : null,
+    })),
+  });
+}
+
+async function listSuperAdminPayments(req, res) {
+  const payments = await prisma.payment.findMany({
+    include: {
+      account: true,
+      client: true,
+    },
+    orderBy: { paidAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Pagamentos globais carregados',
+    data: payments.map(serializePayment),
+  });
+}
+
+async function listSuperAdminSupport(req, res) {
+  const conversations = await prisma.supportConversation.findMany({
+    include: {
+      account: true,
+      client: true,
+      _count: { select: { messages: true } },
+    },
+    orderBy: { lastMessageAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Tickets globais carregados',
+    data: conversations.map(serializeSupportConversation),
+  });
+}
+
+async function listSuperAdminAuditLogs(req, res) {
+  const logs = await prisma.auditLog.findMany({
+    include: {
+      account: true,
+      user: true,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Logs globais carregados',
+    data: logs.map(serializeAuditLog),
+  });
+}
+
+async function listSuperAdminWebhooks(req, res) {
+  const logs = await prisma.webhookLog.findMany({
+    include: { account: true },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+
+  return res.json({
+    message: 'Webhooks globais carregados',
+    data: logs.map(serializeWebhookLog),
   });
 }
 
@@ -229,6 +487,11 @@ async function impersonateAccountAdmin(req, res) {
 module.exports = {
   getSuperAdminOverview,
   listSuperAdminAccounts,
+  listSuperAdminSubscriptions,
+  listSuperAdminPayments,
+  listSuperAdminSupport,
+  listSuperAdminAuditLogs,
+  listSuperAdminWebhooks,
   updateAccountStatus,
   changeSuperAdminAccountPlan,
   impersonateAccountAdmin,
