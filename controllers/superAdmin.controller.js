@@ -184,6 +184,15 @@ function serializeSaasPaymentIntent(intent) {
 
 async function getSuperAdminOverview(req, res) {
   const today = startOfToday();
+  const safe = async (label, promise, fallback) => {
+    try {
+      return await promise;
+    } catch (err) {
+      console.error(`Erro ao carregar metrica Super Admin (${label}):`, err);
+      return fallback;
+    }
+  };
+  const emptyAggregate = { _sum: { amount: 0 }, _count: { id: 0 } };
   const [
     accounts,
     users,
@@ -204,81 +213,137 @@ async function getSuperAdminOverview(req, res) {
     overdueClients,
     supportOpen,
   ] = await Promise.all([
-    prisma.account.count(),
-    prisma.user.count(),
-    prisma.client.count({ where: { status: 'ACTIVE', deletedAt: null } }),
-    prisma.subscription.count({ where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } } }),
-    prisma.subscription.findMany({
-      where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } },
-      select: SUBSCRIPTION_SAFE_SELECT,
-    }),
-    prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
-    prisma.accountSettings.count({
-      where: {
-        saas: {
-          path: ['accountStatus'],
-          equals: 'SUSPENDED',
-        },
-      },
-    }),
-    prisma.payment.aggregate({
-      _sum: { amount: true },
-      _count: { id: true },
-    }),
-    prisma.payment.aggregate({
-      where: { paidAt: { gte: today } },
-      _sum: { amount: true },
-      _count: { id: true },
-    }),
-    prisma.saasPaymentIntent.aggregate({
-      where: { status: 'APPROVED' },
-      _sum: { amount: true },
-      _count: { id: true },
-    }),
-    prisma.saasPaymentIntent.aggregate({
-      where: { status: 'APPROVED', paidAt: { gte: today } },
-      _sum: { amount: true },
-      _count: { id: true },
-    }),
-    prisma.saasPaymentIntent.count({
-      where: { status: { in: ['CREATED', 'PENDING', 'IN_PROCESS'] } },
-    }),
-    prisma.paymentIntent.count({
-      where: { status: { in: ['APPROVED', 'PAID', 'CONFIRMED'] } },
-    }),
-    prisma.debt.count({
-      where: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } },
-    }),
-    prisma.debt.count({
-      where: {
-        status: 'ACTIVE',
-        deletedAt: null,
-        principalOutstanding: { gt: 0 },
-        dueDate: { lt: today },
-      },
-    }),
-    prisma.client.count({
-      where: {
-        status: 'ACTIVE',
-        deletedAt: null,
-        debts: { some: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } } },
-      },
-    }),
-    prisma.client.count({
-      where: {
-        status: 'ACTIVE',
-        deletedAt: null,
-        debts: {
-          some: {
-            status: 'ACTIVE',
-            deletedAt: null,
-            principalOutstanding: { gt: 0 },
-            dueDate: { lt: today },
+    safe('accounts', prisma.account.count(), 0),
+    safe('users', prisma.user.count(), 0),
+    safe('clients', prisma.client.count({ where: { status: 'ACTIVE', deletedAt: null } }), 0),
+    safe(
+      'activeSubscriptions',
+      prisma.subscription.count({ where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } } }),
+      0,
+    ),
+    safe(
+      'activeSubscriptionRows',
+      prisma.subscription.findMany({
+        where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } },
+        select: SUBSCRIPTION_SAFE_SELECT,
+      }),
+      [],
+    ),
+    safe('pastDueSubscriptions', prisma.subscription.count({ where: { status: 'PAST_DUE' } }), 0),
+    safe(
+      'suspendedSettings',
+      prisma.accountSettings.count({
+        where: {
+          saas: {
+            path: ['accountStatus'],
+            equals: 'SUSPENDED',
           },
         },
-      },
-    }),
-    prisma.supportConversation.count({ where: { status: { in: ['OPEN', 'PENDING'] } } }),
+      }),
+      0,
+    ),
+    safe(
+      'paymentStats',
+      prisma.payment.aggregate({
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      emptyAggregate,
+    ),
+    safe(
+      'paymentTodayStats',
+      prisma.payment.aggregate({
+        where: { paidAt: { gte: today } },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      emptyAggregate,
+    ),
+    safe(
+      'saasPaymentStats',
+      prisma.saasPaymentIntent.aggregate({
+        where: { status: 'APPROVED' },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      emptyAggregate,
+    ),
+    safe(
+      'saasPaymentTodayStats',
+      prisma.saasPaymentIntent.aggregate({
+        where: { status: 'APPROVED', paidAt: { gte: today } },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      emptyAggregate,
+    ),
+    safe(
+      'saasPaymentPending',
+      prisma.saasPaymentIntent.count({
+        where: { status: { in: ['CREATED', 'PENDING', 'IN_PROCESS'] } },
+      }),
+      0,
+    ),
+    safe(
+      'pixProcessed',
+      prisma.paymentIntent.count({
+        where: { status: { in: ['APPROVED', 'PAID', 'CONFIRMED'] } },
+      }),
+      0,
+    ),
+    safe(
+      'activeDebts',
+      prisma.debt.count({
+        where: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } },
+      }),
+      0,
+    ),
+    safe(
+      'overdueDebts',
+      prisma.debt.count({
+        where: {
+          status: 'ACTIVE',
+          deletedAt: null,
+          principalOutstanding: { gt: 0 },
+          dueDate: { lt: today },
+        },
+      }),
+      0,
+    ),
+    safe(
+      'activeClientsWithDebt',
+      prisma.client.count({
+        where: {
+          status: 'ACTIVE',
+          deletedAt: null,
+          debts: { some: { status: 'ACTIVE', deletedAt: null, principalOutstanding: { gt: 0 } } },
+        },
+      }),
+      0,
+    ),
+    safe(
+      'overdueClients',
+      prisma.client.count({
+        where: {
+          status: 'ACTIVE',
+          deletedAt: null,
+          debts: {
+            some: {
+              status: 'ACTIVE',
+              deletedAt: null,
+              principalOutstanding: { gt: 0 },
+              dueDate: { lt: today },
+            },
+          },
+        },
+      }),
+      0,
+    ),
+    safe(
+      'supportOpen',
+      prisma.supportConversation.count({ where: { status: { in: ['OPEN', 'PENDING'] } } }),
+      0,
+    ),
   ]);
   const recurring = calculateRecurringRevenue(activeSubscriptionRows);
   const delinquencyRate = activeDebts > 0 ? Math.round((overdueDebts / activeDebts) * 100) : 0;
