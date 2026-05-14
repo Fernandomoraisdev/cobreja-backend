@@ -183,6 +183,7 @@ function serializeSaasPaymentIntent(intent) {
 }
 
 async function getSuperAdminOverview(req, res) {
+  try {
   const today = startOfToday();
   const safe = async (label, promise, fallback) => {
     try {
@@ -382,6 +383,41 @@ async function getSuperAdminOverview(req, res) {
       },
     },
   });
+  } catch (err) {
+    console.error('Erro geral ao carregar Painel SUPER ADMIN:', err);
+    return res.json({
+      message: 'Painel SUPER ADMIN carregado com metricas parciais',
+      data: {
+        totals: {
+          accounts: 0,
+          users: 0,
+          clients: 0,
+          activeSubscriptions: 0,
+          pastDueSubscriptions: 0,
+          suspendedAccounts: 0,
+          supportOpen: 0,
+          paymentsCount: 0,
+          paymentsAmount: 0,
+          paymentsToday: 0,
+          paymentsTodayAmount: 0,
+          saasPaymentsCount: 0,
+          saasPaymentsAmount: 0,
+          saasPaymentsToday: 0,
+          saasPaymentsTodayAmount: 0,
+          saasPaymentsPending: 0,
+          pixProcessed: 0,
+          activeDebts: 0,
+          overdueDebts: 0,
+          activeClientsWithDebt: 0,
+          overdueClients: 0,
+          delinquencyRate: 0,
+          clientDelinquencyRate: 0,
+          mrr: 0,
+          arr: 0,
+        },
+      },
+    });
+  }
 }
 
 async function listSuperAdminAccounts(req, res) {
