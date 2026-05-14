@@ -244,16 +244,24 @@ async function ensureAccountSettings(accountId) {
 }
 
 async function getSettings(req, res) {
-  const accountId = Number(req.user.accountId);
-  const result = await ensureAccountSettings(accountId);
-  if (!result) {
-    return res.status(404).json({ message: 'Conta nao encontrada', data: {} });
-  }
+  try {
+    const accountId = Number(req.user.accountId);
+    const result = await ensureAccountSettings(accountId);
+    if (!result) {
+      return res.status(404).json({ message: 'Conta nao encontrada', data: {} });
+    }
 
-  return res.json({
-    message: 'Configuracoes carregadas',
-    data: sanitizeSettings(result.settings),
-  });
+    return res.json({
+      message: 'Configuracoes carregadas',
+      data: sanitizeSettings(result.settings),
+    });
+  } catch (error) {
+    console.error('Erro ao carregar configuracoes:', error);
+    return res.json({
+      message: 'Configuracoes carregadas com valores padrao',
+      data: sanitizeSettings(defaultSettings({ name: 'Peguei & Paguei' })),
+    });
+  }
 }
 
 async function updateSettings(req, res) {

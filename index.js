@@ -206,7 +206,7 @@ app.post('/login', async (req, res) => {
     const user = await prisma.user.findFirst({
       where: {
         OR: [
-          ...(email ? [{ email }] : []),
+          ...(email ? [{ email: { equals: email, mode: 'insensitive' } }] : []),
           ...(cpf ? [{ cpf }] : []),
         ],
       },
@@ -288,7 +288,7 @@ app.post('/register', async (req, res) => {
     const duplicatedUser = await prisma.user.findFirst({
       where: {
         OR: [
-          { email },
+          { email: { equals: email, mode: 'insensitive' } },
           ...(cpf ? [{ cpf }] : []),
         ],
       },
@@ -364,7 +364,7 @@ app.post('/client-register', async (req, res) => {
     const duplicatedUser = await prisma.user.findFirst({
       where: {
         OR: [
-          { email },
+          { email: { equals: email, mode: 'insensitive' } },
           ...(cpf ? [{ cpf }] : []),
         ],
       },
