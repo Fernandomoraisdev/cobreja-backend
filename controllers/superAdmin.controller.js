@@ -44,6 +44,18 @@ function serializeAccount(account) {
   };
 }
 
+const SUBSCRIPTION_SAFE_SELECT = {
+  id: true,
+  status: true,
+  trialEndsAt: true,
+  currentPeriodEnd: true,
+  externalProvider: true,
+  externalId: true,
+  plan: true,
+  createdAt: true,
+  updatedAt: true,
+};
+
 function startOfToday() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -198,7 +210,7 @@ async function getSuperAdminOverview(req, res) {
     prisma.subscription.count({ where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } } }),
     prisma.subscription.findMany({
       where: { status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] } },
-      include: { plan: true },
+      select: SUBSCRIPTION_SAFE_SELECT,
     }),
     prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
     prisma.accountSettings.count({
@@ -317,7 +329,7 @@ async function listSuperAdminAccounts(req, res) {
         take: 1,
       },
       subscriptions: {
-        include: { plan: true, pendingPlan: true },
+        select: SUBSCRIPTION_SAFE_SELECT,
         orderBy: { createdAt: 'desc' },
         take: 1,
       },
@@ -342,13 +354,15 @@ async function listSuperAdminAccounts(req, res) {
 
 async function listSuperAdminSubscriptions(req, res) {
   const subscriptions = await prisma.subscription.findMany({
-    include: {
-      plan: true,
-      pendingPlan: true,
+    select: {
+      ...SUBSCRIPTION_SAFE_SELECT,
       account: {
-        include: {
+        select: {
+          id: true,
+          name: true,
           users: {
             where: { role: 'ADMIN' },
+            select: { id: true, name: true, email: true },
             orderBy: { createdAt: 'asc' },
             take: 1,
           },
