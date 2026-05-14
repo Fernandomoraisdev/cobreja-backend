@@ -1,6 +1,7 @@
 const prisma = require('../prisma');
 const {
   buildBillingStatus,
+  cancelScheduledPlanChange,
   changeAccountPlan,
   renewAccountSubscription,
   serializeSubscription,
@@ -316,7 +317,7 @@ async function listSuperAdminAccounts(req, res) {
         take: 1,
       },
       subscriptions: {
-        include: { plan: true },
+        include: { plan: true, pendingPlan: true },
         orderBy: { createdAt: 'desc' },
         take: 1,
       },
@@ -343,6 +344,7 @@ async function listSuperAdminSubscriptions(req, res) {
   const subscriptions = await prisma.subscription.findMany({
     include: {
       plan: true,
+      pendingPlan: true,
       account: {
         include: {
           users: {
@@ -405,6 +407,32 @@ async function renewSuperAdminSubscription(req, res) {
 
   return res.json({
     message: 'Assinatura renovada',
+    data: serializeSubscription(subscription),
+  });
+}
+
+async function cancelSuperAdminScheduledPlanChange(req, res) {
+  const accountId = Number(req.params.accountId);
+  if (!accountId) {
+    return res.status(400).json({ message: 'Conta obrigatoria', data: {} });
+  }
+
+  const subscription = await cancelScheduledPlanChange({ accountId });
+
+  await writeAuditLog({
+    req,
+    action: 'SUPER_ADMIN_PLAN_SCHEDULE_CANCELLED',
+    entity: 'Subscription',
+    entityId: subscription.id,
+    severity: 'INFO',
+    metadata: {
+      accountId,
+      planCode: subscription.plan?.code,
+    },
+  });
+
+  return res.json({
+    message: 'Agendamento de plano cancelado pelo SUPER ADMIN',
     data: serializeSubscription(subscription),
   });
 }
@@ -609,6 +637,7 @@ module.exports = {
   listSuperAdminWebhooks,
   updateAccountStatus,
   changeSuperAdminAccountPlan,
+  cancelSuperAdminScheduledPlanChange,
   renewSuperAdminSubscription,
   impersonateAccountAdmin,
 };
