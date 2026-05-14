@@ -165,6 +165,8 @@ function buildBillingStatus(subscription, now = new Date()) {
     accessBlocked,
     renewRequired: isPastDue,
     currentPeriodEnd: subscription?.currentPeriodEnd || null,
+    pendingChangeAt: subscription?.pendingChangeAt || null,
+    pendingPlan: serializePlan(subscription?.pendingPlan),
   };
 }
 
@@ -181,7 +183,7 @@ async function refreshSubscriptionStatus(subscription) {
     return prisma.subscription.update({
       where: { id: subscription.id },
       data: { status: 'PAST_DUE' },
-      include: { plan: true },
+      include: { plan: true, pendingPlan: true },
     });
   }
   return subscription;
@@ -215,6 +217,8 @@ function serializeSubscription(subscription) {
     currentPeriodEnd: subscription.currentPeriodEnd,
     externalProvider: subscription.externalProvider,
     externalId: subscription.externalId,
+    pendingChangeAt: subscription.pendingChangeAt,
+    pendingPlan: serializePlan(subscription.pendingPlan),
     plan: serializePlan(subscription.plan),
     createdAt: subscription.createdAt,
     updatedAt: subscription.updatedAt,
@@ -283,13 +287,14 @@ async function getActiveClientCount(accountId) {
 
 async function ensureAccountSubscription(accountId) {
   await ensureDefaultPlans();
+  await applyScheduledPlanChanges(accountId);
 
   const existing = await prisma.subscription.findFirst({
     where: {
       accountId,
       status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] },
     },
-    include: { plan: true },
+    include: { plan: true, pendingPlan: true },
     orderBy: { createdAt: 'desc' },
   });
 
@@ -304,7 +309,7 @@ async function ensureAccountSubscription(accountId) {
       accountId,
       planId: freePlan.id,
     },
-    include: { plan: true },
+    include: { plan: true, pendingPlan: true },
   });
 }
 
@@ -414,10 +419,97 @@ async function changeAccountPlan({
       currentPeriodEnd: getPeriodEnd(plan),
       externalProvider,
       externalId,
+      pendingPlanId: null,
+      pendingChangeAt: null,
       accountId,
       planId: plan.id,
     },
-    include: { plan: true },
+    include: { plan: true, pendingPlan: true },
+  });
+}
+
+async function applyScheduledPlanChanges(accountId, now = new Date()) {
+  const dueSubscriptions = await prisma.subscription.findMany({
+    where: {
+      accountId: Number(accountId),
+      status: { in: ['ACTIVE', 'PAST_DUE'] },
+      pendingPlanId: { not: null },
+      pendingChangeAt: { lte: now },
+    },
+    include: { plan: true, pendingPlan: true },
+    orderBy: { pendingChangeAt: 'asc' },
+  });
+
+  for (const subscription of dueSubscriptions) {
+    if (!subscription.pendingPlan) continue;
+    await changeAccountPlan({
+      accountId: subscription.accountId,
+      planCode: subscription.pendingPlan.code,
+      status: 'ACTIVE',
+    });
+  }
+}
+
+async function scheduleAccountPlanChange({ accountId, planCode }) {
+  await ensureDefaultPlans();
+  const [subscription, plan, activeClients] = await Promise.all([
+    ensureAccountSubscription(accountId),
+    prisma.plan.findFirst({
+      where: {
+        code: String(planCode || '').trim().toUpperCase(),
+        isActive: true,
+        isPublic: true,
+      },
+    }),
+    getActiveClientCount(accountId),
+  ]);
+
+  if (!plan) {
+    const err = new Error('Plano nao encontrado');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (subscription.plan?.code === plan.code) {
+    const err = new Error('Este plano ja esta ativo nesta conta');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  if (plan.clientLimit != null && activeClients > plan.clientLimit) {
+    const err = new Error(
+      `Este plano permite ${plan.clientLimit} cliente(s) ativo(s), mas esta conta possui ${activeClients}. Escolha um plano maior ou arquive clientes antes de agendar a troca.`,
+    );
+    err.statusCode = 409;
+    err.code = 'PLAN_LIMIT_TOO_LOW';
+    err.data = {
+      activeClients,
+      clientLimit: plan.clientLimit,
+      plan: serializePlan(plan),
+    };
+    throw err;
+  }
+
+  const changeAt = subscription.currentPeriodEnd || new Date();
+  return prisma.subscription.update({
+    where: { id: subscription.id },
+    data: {
+      pendingPlanId: plan.id,
+      pendingChangeAt: changeAt,
+    },
+    include: { plan: true, pendingPlan: true },
+  });
+}
+
+async function cancelScheduledPlanChange({ accountId }) {
+  const subscription = await ensureAccountSubscription(accountId);
+  return prisma.subscription.update({
+    where: { id: subscription.id },
+    data: {
+      pendingPlanId: null,
+      pendingChangeAt: null,
+    },
+    include: { plan: true, pendingPlan: true },
   });
 }
 
@@ -462,8 +554,8 @@ async function renewAccountSubscription({ accountId, subscriptionId = null }) {
   if (isFreePlan(subscription.plan) || isLifetimePlan(subscription.plan)) {
     return prisma.subscription.update({
       where: { id: subscription.id },
-      data: { status: 'ACTIVE', currentPeriodEnd: null },
-      include: { plan: true },
+      data: { status: 'ACTIVE', currentPeriodEnd: null, pendingPlanId: null, pendingChangeAt: null },
+      include: { plan: true, pendingPlan: true },
     });
   }
 
@@ -472,8 +564,10 @@ async function renewAccountSubscription({ accountId, subscriptionId = null }) {
     data: {
       status: 'ACTIVE',
       currentPeriodEnd: getRenewedPeriodEnd(subscription.plan, subscription.currentPeriodEnd),
+      pendingPlanId: null,
+      pendingChangeAt: null,
     },
-    include: { plan: true },
+    include: { plan: true, pendingPlan: true },
   });
 }
 
@@ -583,9 +677,12 @@ module.exports = {
   getSaasOverview,
   changeAccountPlan,
   activatePaidPlan,
+  applyScheduledPlanChanges,
   applySaasPaymentResult,
   buildBillingStatus,
+  cancelScheduledPlanChange,
   enforceClientLimit,
   renewAccountSubscription,
+  scheduleAccountPlanChange,
   serializeSubscription,
 };

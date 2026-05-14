@@ -137,6 +137,7 @@ model Plan {
   isActive        Boolean  @default(true)
 
   subscriptions   Subscription[]
+  pendingSubscriptions Subscription[] @relation("PendingSubscriptionPlan")
   saasPaymentIntents SaasPaymentIntent[]
 
   createdAt       DateTime @default(now())
@@ -150,6 +151,9 @@ model Subscription {
   currentPeriodEnd DateTime?
   externalProvider String?
   externalId      String?
+  pendingPlanId   Int?
+  pendingPlan     Plan?    @relation("PendingSubscriptionPlan", fields: [pendingPlanId], references: [id], onDelete: SetNull)
+  pendingChangeAt DateTime?
 
   planId          Int
   plan            Plan     @relation(fields: [planId], references: [id])
@@ -162,6 +166,8 @@ model Subscription {
   updatedAt       DateTime @default(now()) @updatedAt
 
   @@index([accountId, status])
+  @@index([pendingPlanId])
+  @@index([pendingChangeAt])
 }
 
 model SaasPaymentIntent {

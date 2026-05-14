@@ -8,9 +8,11 @@ const {
 } = require('../services/mercadopago.service');
 const {
   applySaasPaymentResult,
+  cancelScheduledPlanChange,
   changeAccountPlan,
   ensureDefaultPlans,
   getSaasOverview,
+  scheduleAccountPlanChange,
   serializeSubscription,
 } = require('../services/saas.service');
 
@@ -153,6 +155,90 @@ async function selectSaasPlan(req, res) {
     console.error('Erro ao alterar plano:', err);
     return res.status(err.statusCode || 500).json({
       message: err.message || 'Erro ao alterar plano',
+      data: err.data || {},
+    });
+  }
+}
+
+async function scheduleSaasPlanChange(req, res) {
+  try {
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Apenas ADMIN pode agendar troca de plano', data: {} });
+    }
+
+    const planCode = String(req.body.planCode || req.body.code || '').trim().toUpperCase();
+    if (!planCode) {
+      return res.status(400).json({ message: 'planCode e obrigatorio', data: {} });
+    }
+
+    const subscription = await scheduleAccountPlanChange({
+      accountId: req.user.accountId,
+      planCode,
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'SAAS_PLAN_CHANGE_SCHEDULED',
+      entity: 'Subscription',
+      entityId: subscription.id,
+      severity: 'INFO',
+      metadata: {
+        planCode,
+        planName: subscription.pendingPlan?.name,
+        pendingChangeAt: subscription.pendingChangeAt,
+      },
+    });
+
+    const overview = await getSaasOverview(req.user.accountId);
+    return res.json({
+      message: 'Mudanca de plano agendada para o fim do ciclo',
+      data: {
+        subscription: serializeSubscription(subscription),
+        overview,
+      },
+    });
+  } catch (err) {
+    console.error('Erro ao agendar troca de plano:', err);
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Erro ao agendar troca de plano',
+      data: err.data || {},
+    });
+  }
+}
+
+async function cancelScheduledSaasPlanChange(req, res) {
+  try {
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Apenas ADMIN pode cancelar troca de plano', data: {} });
+    }
+
+    const subscription = await cancelScheduledPlanChange({
+      accountId: req.user.accountId,
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'SAAS_PLAN_CHANGE_SCHEDULE_CANCELLED',
+      entity: 'Subscription',
+      entityId: subscription.id,
+      severity: 'INFO',
+      metadata: {
+        planCode: subscription.plan?.code,
+      },
+    });
+
+    const overview = await getSaasOverview(req.user.accountId);
+    return res.json({
+      message: 'Agendamento de plano cancelado',
+      data: {
+        subscription: serializeSubscription(subscription),
+        overview,
+      },
+    });
+  } catch (err) {
+    console.error('Erro ao cancelar troca de plano:', err);
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Erro ao cancelar troca de plano',
       data: err.data || {},
     });
   }
@@ -335,9 +421,11 @@ async function getSaasPlanPaymentStatus(req, res) {
 }
 
 module.exports = {
+  cancelScheduledSaasPlanChange,
   createSaasPlanPix,
   getSaasPlanPaymentStatus,
   getSaasStatus,
   listSaasPlanPayments,
+  scheduleSaasPlanChange,
   selectSaasPlan,
 };
