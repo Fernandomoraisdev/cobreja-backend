@@ -15,6 +15,7 @@ const {
   cancelSuperAdminScheduledPlanChange,
   renewSuperAdminSubscription,
   impersonateAccountAdmin,
+  impersonateClientUser,
 } = require('../controllers/superAdmin.controller');
 
 const router = express.Router();
@@ -34,5 +35,7 @@ router.post('/accounts/:accountId/plan', changeSuperAdminAccountPlan);
 router.delete('/accounts/:accountId/plan-schedule', cancelSuperAdminScheduledPlanChange);
 router.post('/accounts/:accountId/subscription/renew', renewSuperAdminSubscription);
 router.post('/accounts/:accountId/impersonate', impersonateAccountAdmin);
+router.post('/impersonate-client', impersonateClientUser);
+router.post('/accounts/:accountId/impersonate-client', impersonateClientUser);
 
 module.exports = router;

@@ -741,6 +741,73 @@ async function impersonateAccountAdmin(req, res) {
   });
 }
 
+async function impersonateClientUser(req, res) {
+  const accountId = Number(req.params.accountId || req.body.accountId || 0);
+  const clientId = Number(req.body.clientId || req.query.clientId || 0);
+
+  const client = await prisma.client.findFirst({
+    where: {
+      ...(accountId ? { accountId } : {}),
+      ...(clientId ? { id: clientId } : {}),
+      userId: { not: null },
+      status: 'ACTIVE',
+      deletedAt: null,
+    },
+    include: {
+      account: true,
+      user: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (!client?.user) {
+    return res.status(404).json({
+      message: 'Nenhum cliente com acesso encontrado para impersonar',
+      data: {},
+    });
+  }
+
+  const token = signAuthToken({
+    ...client.user,
+    impersonatedBySuperAdmin: true,
+    originalSuperAdminUserId: req.user.id,
+  });
+
+  await writeAuditLog({
+    req,
+    action: 'SUPER_ADMIN_CLIENT_IMPERSONATION_STARTED',
+    entity: 'Client',
+    entityId: client.id,
+    severity: 'WARNING',
+    metadata: {
+      accountId: client.accountId,
+      clientId: client.id,
+      clientEmail: client.user.email,
+    },
+  });
+
+  return res.json({
+    message: 'Token de cliente gerado',
+    data: {
+      token,
+      user: {
+        id: client.user.id,
+        name: client.user.name,
+        email: client.user.email,
+        role: client.user.role,
+        accountId: client.user.accountId,
+      },
+      account: client.account,
+      client: {
+        id: client.id,
+        name: client.name,
+        email: client.email,
+        phone: client.phone,
+      },
+    },
+  });
+}
+
 module.exports = {
   getSuperAdminOverview,
   listSuperAdminAccounts,
@@ -755,4 +822,5 @@ module.exports = {
   cancelSuperAdminScheduledPlanChange,
   renewSuperAdminSubscription,
   impersonateAccountAdmin,
+  impersonateClientUser,
 };
