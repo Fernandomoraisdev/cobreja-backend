@@ -4,6 +4,7 @@ const {
   cancelScheduledSaasPlanChange,
   createPublicSaasSignup,
   createSaasPlanPix,
+  getPublicSaasSignupStatus,
   getSaasPlanPaymentStatus,
   getSaasStatus,
   listPublicSaasPlans,
@@ -16,6 +17,7 @@ const router = express.Router();
 
 router.get('/public/plans', listPublicSaasPlans);
 router.post('/public/signup', createPublicSaasSignup);
+router.get('/public/signup-status/:id', getPublicSaasSignupStatus);
 router.get('/status', authMiddleware, getSaasStatus);
 router.get('/plan-payments', authMiddleware, listSaasPlanPayments);
 router.get('/plan-payments/:id/status', authMiddleware, getSaasPlanPaymentStatus);

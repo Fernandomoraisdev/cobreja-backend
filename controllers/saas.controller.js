@@ -410,6 +410,87 @@ async function createPublicSaasSignup(req, res) {
   }
 }
 
+async function getPublicSaasSignupStatus(req, res) {
+  try {
+    const intentId = Number(req.params.id);
+    const externalReference = String(req.query.externalReference || '').trim();
+
+    if (!intentId || !externalReference) {
+      return res.status(400).json({
+        message: 'Dados da cobranca invalidos',
+        data: {},
+      });
+    }
+
+    let intent = await prisma.saasPaymentIntent.findFirst({
+      where: {
+        id: intentId,
+        externalReference,
+      },
+      include: { plan: true, subscription: true },
+    });
+
+    if (!intent) {
+      return res.status(404).json({
+        message: 'Cadastro SaaS nao encontrado',
+        data: {},
+      });
+    }
+
+    if (intent.mercadoPagoPaymentId && !['APPROVED', 'CANCELLED', 'REJECTED', 'REFUNDED'].includes(intent.status)) {
+      const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(null);
+      const mpPayment = await getPayment(intent.mercadoPagoPaymentId, {
+        accessToken: mercadoPagoCredentials.accessToken,
+      });
+      await applySaasPaymentResult({
+        mercadoPagoPaymentId: mpPayment.id,
+        externalReference: mpPayment.external_reference,
+        status: mapPaymentStatus(mpPayment.status),
+        rawResponse: mpPayment,
+        paidAt: mpPayment.date_approved ? new Date(mpPayment.date_approved) : undefined,
+      });
+      intent = await prisma.saasPaymentIntent.findFirst({
+        where: { id: intentId, externalReference },
+        include: { plan: true, subscription: true },
+      });
+    }
+
+    const isApproved = intent.status === 'APPROVED';
+    let token = null;
+    let user = null;
+
+    if (isApproved) {
+      user = await prisma.user.findFirst({
+        where: {
+          accountId: intent.accountId,
+          role: 'ADMIN',
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (user) token = signAuthToken(user);
+    }
+
+    return res.json({
+      message: isApproved ? 'Cadastro liberado' : 'Cadastro aguardando pagamento',
+      data: {
+        status: isApproved ? 'ACTIVE' : intent.status,
+        token,
+        user: sanitizeUser(user),
+        intent: serializeSaasIntent(intent),
+        accountId: intent.accountId,
+      },
+      token,
+      user: sanitizeUser(user),
+    });
+  } catch (err) {
+    console.error('Erro ao consultar cadastro SaaS publico:', err);
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Erro ao consultar cadastro SaaS',
+      data: err.response || {},
+    });
+  }
+}
+
 async function getSaasStatus(req, res) {
   try {
     if (req.user.role !== 'ADMIN') {
@@ -774,6 +855,7 @@ async function getSaasPlanPaymentStatus(req, res) {
 
 module.exports = {
   cancelScheduledSaasPlanChange,
+  getPublicSaasSignupStatus,
   createPublicSaasSignup,
   createSaasPlanPix,
   getSaasPlanPaymentStatus,

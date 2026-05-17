@@ -378,10 +378,13 @@ async function ensureAccountSubscription(accountId) {
 }
 
 async function getSaasOverview(accountId) {
-  const [plans, subscription, activeClients, planPayments, settings] = await Promise.all([
+  const [plans, subscription, activeClients, debtCount, planPayments, settings] = await Promise.all([
     ensureDefaultPlans(),
     ensureAccountSubscription(accountId),
     getActiveClientCount(accountId),
+    prisma.debt.count({
+      where: { accountId: Number(accountId), deletedAt: null },
+    }),
     prisma.saasPaymentIntent.findMany({
       where: { accountId: Number(accountId) },
       include: { plan: true },
@@ -436,12 +439,12 @@ async function getSaasOverview(accountId) {
     onboarding: buildOnboardingStatus({
       settings,
       activeClients,
-      planPayments,
+      debtCount,
     }),
   };
 }
 
-function buildOnboardingStatus({ settings, activeClients, planPayments }) {
+function buildOnboardingStatus({ settings, activeClients, debtCount }) {
   const saas = settings?.saas && typeof settings.saas === 'object' ? settings.saas : {};
   const saved = saas.onboardingStatus && typeof saas.onboardingStatus === 'object'
     ? saas.onboardingStatus
@@ -468,7 +471,7 @@ function buildOnboardingStatus({ settings, activeClients, planPayments }) {
     {
       key: 'CREATE_FIRST_CHARGE',
       title: 'Criar primeira cobranca',
-      done: saved.firstChargeCreated === true || (planPayments || []).some((intent) => intent.status === 'APPROVED'),
+      done: saved.firstChargeCreated === true || Number(debtCount || 0) > 0,
     },
   ];
   const completed = steps.filter((step) => step.done).length;
