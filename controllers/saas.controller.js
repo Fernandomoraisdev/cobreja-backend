@@ -1,6 +1,10 @@
 const { writeAuditLog } = require('../services/audit.service');
 const prisma = require('../prisma');
+const bcrypt = require('bcrypt');
+const crypto = require('crypto');
+const { signAuthToken } = require('../utils/auth');
 const {
+  createCheckoutPreference,
   createPixPayment,
   getMercadoPagoCredentialsForAccount,
   getPayment,
@@ -18,6 +22,52 @@ const {
 
 function onlyDigits(value) {
   return String(value || '').replace(/\D+/g, '');
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeCompany(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function sanitizeUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    cpf: user.cpf,
+    phone: user.phone,
+    avatarUrl: user.avatarUrl,
+    role: user.role,
+    accountId: user.accountId,
+  };
+}
+
+function buildInviteCode(companyName) {
+  const prefix = String(companyName || 'PEGUEI')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6) || 'PEGUEI';
+  return `${prefix}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+async function createUniqueInviteCode(companyName, tx = prisma) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const code = buildInviteCode(companyName);
+    const existing = await tx.account.findUnique({ where: { inviteCode: code } });
+    if (!existing) return code;
+  }
+  throw new Error('Nao foi possivel gerar convite da empresa');
+}
+
+function addDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
 }
 
 function splitName(name) {
@@ -56,6 +106,308 @@ function serializeSaasIntent(intent) {
         }
       : null,
   };
+}
+
+async function listPublicSaasPlans(req, res) {
+  try {
+    const plans = await ensureDefaultPlans();
+    return res.json({
+      message: 'Planos publicos carregados',
+      data: plans
+        .filter((plan) => plan.isActive && plan.isPublic)
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+        .map((plan) => ({
+          id: plan.id,
+          code: plan.code,
+          name: plan.name,
+          description: plan.description,
+          priceCents: plan.priceCents,
+          currency: plan.currency,
+          clientLimit: plan.clientLimit,
+          billingPeriod: plan.billingPeriod,
+          periodMonths: plan.periodMonths,
+          features: Array.isArray(plan.features) ? plan.features : [],
+        })),
+    });
+  } catch (err) {
+    console.error('Erro ao carregar planos publicos:', err);
+    return res.status(500).json({
+      message: err.message || 'Erro ao carregar planos',
+      data: [],
+    });
+  }
+}
+
+async function createPublicSaasSignup(req, res) {
+  try {
+    await ensureDefaultPlans();
+
+    const name = String(req.body.name || '').trim();
+    const companyName = normalizeCompany(req.body.company || req.body.companyName || req.body.empresa);
+    const email = normalizeEmail(req.body.email);
+    const phone = String(req.body.phone || '').trim() || null;
+    const password = String(req.body.password || '');
+    const planCode = String(req.body.planCode || req.body.code || 'FREE').trim().toUpperCase();
+    const paymentMethod = String(req.body.paymentMethod || 'PIX').trim().toUpperCase();
+
+    if (!name || !companyName || !email || !phone || !password) {
+      return res.status(400).json({
+        message: 'Nome, empresa, email, telefone e senha sao obrigatorios',
+        data: {},
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        message: 'A senha precisa ter pelo menos 8 caracteres',
+        data: {},
+      });
+    }
+
+    const plan = await prisma.plan.findFirst({
+      where: { code: planCode, isActive: true, isPublic: true },
+    });
+
+    if (!plan) {
+      return res.status(404).json({ message: 'Plano nao encontrado', data: {} });
+    }
+
+    const [duplicatedUser, duplicatedAccount] = await Promise.all([
+      prisma.user.findFirst({
+        where: { email: { equals: email, mode: 'insensitive' } },
+        select: { id: true },
+      }),
+      prisma.account.findFirst({
+        where: { name: { equals: companyName, mode: 'insensitive' } },
+        select: { id: true },
+      }),
+    ]);
+
+    if (duplicatedUser) {
+      return res.status(409).json({
+        message: 'Ja existe um usuario com este email',
+        data: {},
+      });
+    }
+
+    if (duplicatedAccount) {
+      return res.status(409).json({
+        message: 'Ja existe uma empresa com este nome',
+        data: {},
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const now = new Date();
+    const isFreeSignup = Number(plan.priceCents || 0) <= 0 || plan.code === 'FREE';
+
+    const result = await prisma.$transaction(async (tx) => {
+      const inviteCode = await createUniqueInviteCode(companyName, tx);
+      const account = await tx.account.create({
+        data: {
+          name: companyName,
+          inviteCode,
+          settings: {
+            create: {
+              company: {
+                name: companyName,
+                email,
+                phone,
+                createdFrom: 'PUBLIC_SAAS_SIGNUP',
+              },
+              admin: {
+                name,
+                email,
+                phone,
+              },
+              saas: {
+                accountStatus: isFreeSignup ? 'ACTIVE' : 'PENDING_PAYMENT',
+                signupSource: 'PUBLIC_LANDING',
+                onboardingStatus: {
+                  companyConfigured: false,
+                  mercadoPagoConnected: false,
+                  firstClientCreated: false,
+                  firstChargeCreated: false,
+                },
+              },
+              appearance: {
+                theme: 'dark',
+                accent: 'peguei_paguei',
+              },
+            },
+          },
+        },
+      });
+
+      const user = await tx.user.create({
+        data: {
+          name,
+          email,
+          phone,
+          password: passwordHash,
+          role: 'ADMIN',
+          accountId: account.id,
+        },
+      });
+
+      const subscription = await tx.subscription.create({
+        data: {
+          status: isFreeSignup ? 'TRIAL' : 'PENDING_PAYMENT',
+          trialEndsAt: isFreeSignup ? addDays(now, 30) : null,
+          currentPeriodEnd: isFreeSignup ? addDays(now, 30) : null,
+          externalProvider: isFreeSignup ? 'TRIAL' : null,
+          accountId: account.id,
+          planId: plan.id,
+        },
+        include: { plan: true, pendingPlan: true },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: isFreeSignup ? 'PUBLIC_SAAS_TRIAL_CREATED' : 'PUBLIC_SAAS_SIGNUP_PENDING_PAYMENT',
+          entity: 'Subscription',
+          entityId: String(subscription.id),
+          severity: 'INFO',
+          metadata: {
+            planCode: plan.code,
+            companyName,
+            paymentMethod: isFreeSignup ? 'TRIAL' : paymentMethod,
+          },
+          ip: req.ip || null,
+          userAgent: req.headers?.['user-agent'] || null,
+          accountId: account.id,
+          userId: user.id,
+        },
+      });
+
+      return { account, user, subscription };
+    });
+
+    if (isFreeSignup) {
+      const token = signAuthToken(result.user);
+      return res.status(201).json({
+        message: 'Trial criado com sucesso',
+        data: {
+          status: 'ACTIVE_TRIAL',
+          token,
+          user: sanitizeUser(result.user),
+          account: result.account,
+          subscription: serializeSubscription(result.subscription),
+          onboarding: {
+            nextStep: 'CONFIGURE_COMPANY',
+            checklist: ['CONFIGURE_COMPANY', 'CONNECT_MERCADO_PAGO', 'CREATE_FIRST_CLIENT', 'CREATE_FIRST_CHARGE'],
+          },
+        },
+        token,
+        user: sanitizeUser(result.user),
+      });
+    }
+
+    const { firstName, lastName } = splitName(name);
+    const externalReference = `pegueipaguei:public-saas:${result.account.id}:${plan.code}:${Date.now()}`;
+    const idempotencyKey = `public-saas-${result.account.id}-${plan.code}-${Date.now()}`;
+    const mercadoPagoCredentials = await getMercadoPagoCredentialsForAccount(null);
+    let paymentPayload;
+    let rawPayment;
+
+    if (paymentMethod === 'CARD') {
+      rawPayment = await createCheckoutPreference({
+        amount: Number(plan.priceCents || 0) / 100,
+        description: `Peguei & Paguei - Plano ${plan.name}`,
+        externalReference,
+        accessToken: mercadoPagoCredentials.accessToken,
+        payer: { email, firstName, lastName, cpf: null },
+      });
+      paymentPayload = {
+        method: 'CARD',
+        checkoutUrl: rawPayment.init_point || rawPayment.sandbox_init_point || null,
+        sandboxCheckoutUrl: rawPayment.sandbox_init_point || null,
+      };
+    } else {
+      rawPayment = await createPixPayment({
+        amount: Number(plan.priceCents || 0) / 100,
+        description: `Peguei & Paguei - Plano ${plan.name}`,
+        externalReference,
+        idempotencyKey,
+        accessToken: mercadoPagoCredentials.accessToken,
+        payer: { email, firstName, lastName, cpf: null },
+      });
+      const transactionData = rawPayment?.point_of_interaction?.transaction_data || {};
+      paymentPayload = {
+        method: 'PIX',
+        qrCode: transactionData.qr_code || null,
+        qrCodeBase64: transactionData.qr_code_base64 || null,
+        ticketUrl: transactionData.ticket_url || null,
+      };
+    }
+
+    const intent = await prisma.saasPaymentIntent.create({
+      data: {
+        provider: 'MERCADO_PAGO',
+        status: paymentMethod === 'CARD' ? 'CREATED' : mapPaymentStatus(rawPayment.status),
+        amount: Number(plan.priceCents || 0) / 100,
+        currency: 'BRL',
+        externalReference,
+        idempotencyKey,
+        mercadoPagoPaymentId: rawPayment.id ? String(rawPayment.id) : null,
+        qrCode: paymentPayload.qrCode || null,
+        qrCodeBase64: paymentPayload.qrCodeBase64 || null,
+        ticketUrl: paymentPayload.ticketUrl || paymentPayload.checkoutUrl || null,
+        rawResponse: {
+          ...rawPayment,
+          credentialSource: mercadoPagoCredentials.credentialSource,
+          signupFlow: 'PUBLIC',
+          paymentMethod,
+        },
+        planId: plan.id,
+        subscriptionId: result.subscription.id,
+        accountId: result.account.id,
+      },
+      include: { plan: true },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        action: paymentMethod === 'CARD' ? 'PUBLIC_SAAS_CHECKOUT_CREATED' : 'PUBLIC_SAAS_PIX_CREATED',
+        entity: 'SaasPaymentIntent',
+        entityId: String(intent.id),
+        severity: 'INFO',
+        metadata: {
+          planCode: plan.code,
+          amount: intent.amount,
+          mercadoPagoPaymentId: intent.mercadoPagoPaymentId,
+          externalReference,
+        },
+        ip: req.ip || null,
+        userAgent: req.headers?.['user-agent'] || null,
+        accountId: result.account.id,
+        userId: result.user.id,
+      },
+    });
+
+    return res.status(201).json({
+      message: paymentMethod === 'CARD'
+        ? 'Checkout criado com sucesso'
+        : 'Pix criado com sucesso',
+      data: {
+        status: 'PENDING_PAYMENT',
+        accountId: result.account.id,
+        subscription: serializeSubscription(result.subscription),
+        intent: serializeSaasIntent(intent),
+        payment: paymentPayload,
+        onboarding: {
+          nextStep: 'WAIT_PAYMENT',
+          message: 'A conta sera liberada automaticamente quando o Mercado Pago confirmar o pagamento.',
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Erro no cadastro SaaS publico:', err);
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Erro ao criar cadastro SaaS',
+      data: err.response || {},
+    });
+  }
 }
 
 async function getSaasStatus(req, res) {
@@ -422,9 +774,11 @@ async function getSaasPlanPaymentStatus(req, res) {
 
 module.exports = {
   cancelScheduledSaasPlanChange,
+  createPublicSaasSignup,
   createSaasPlanPix,
   getSaasPlanPaymentStatus,
   getSaasStatus,
+  listPublicSaasPlans,
   listSaasPlanPayments,
   scheduleSaasPlanChange,
   selectSaasPlan,

@@ -2,9 +2,11 @@ const express = require('express');
 const authMiddleware = require('../authMiddleware');
 const {
   cancelScheduledSaasPlanChange,
+  createPublicSaasSignup,
   createSaasPlanPix,
   getSaasPlanPaymentStatus,
   getSaasStatus,
+  listPublicSaasPlans,
   listSaasPlanPayments,
   scheduleSaasPlanChange,
   selectSaasPlan,
@@ -12,6 +14,8 @@ const {
 
 const router = express.Router();
 
+router.get('/public/plans', listPublicSaasPlans);
+router.post('/public/signup', createPublicSaasSignup);
 router.get('/status', authMiddleware, getSaasStatus);
 router.get('/plan-payments', authMiddleware, listSaasPlanPayments);
 router.get('/plan-payments/:id/status', authMiddleware, getSaasPlanPaymentStatus);

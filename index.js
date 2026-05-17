@@ -224,6 +224,32 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Senha invalida', data: {} });
     }
 
+    if (user.role === 'ADMIN' && !isSuperAdminUser(user)) {
+      const subscription = await prisma.subscription.findFirst({
+        where: {
+          accountId: user.accountId,
+          status: { in: ['PENDING_PAYMENT'] },
+        },
+        include: { plan: true },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (subscription) {
+        return res.status(402).json({
+          message: 'Cadastro aguardando confirmacao de pagamento. Assim que o Mercado Pago aprovar, o painel sera liberado automaticamente.',
+          data: {
+            status: subscription.status,
+            plan: subscription.plan
+              ? {
+                  code: subscription.plan.code,
+                  name: subscription.plan.name,
+                }
+              : null,
+          },
+        });
+      }
+    }
+
     const token = signAuthToken(user);
 
     try {

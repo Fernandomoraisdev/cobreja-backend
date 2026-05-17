@@ -201,6 +201,50 @@ async function createPixPayment({
   });
 }
 
+async function createCheckoutPreference({
+  amount,
+  description,
+  payer,
+  externalReference,
+  accessToken,
+}) {
+  const body = {
+    items: [
+      {
+        title: description,
+        quantity: 1,
+        currency_id: 'BRL',
+        unit_price: amount,
+      },
+    ],
+    payer: {
+      email: payer.email,
+      name: [payer.firstName, payer.lastName].filter(Boolean).join(' ').trim(),
+      ...(payer.cpf
+        ? {
+            identification: {
+              type: 'CPF',
+              number: payer.cpf,
+            },
+          }
+        : {}),
+    },
+    external_reference: externalReference,
+    statement_descriptor: 'PEGUEI PAGUEI',
+  };
+
+  const notificationUrl = buildNotificationUrl();
+  if (notificationUrl) {
+    body.notification_url = notificationUrl;
+  }
+
+  return mercadoPagoRequest('/checkout/preferences', {
+    method: 'POST',
+    body,
+    accessToken,
+  });
+}
+
 async function getPayment(paymentId, { accessToken } = {}) {
   return mercadoPagoRequest(`/v1/payments/${encodeURIComponent(paymentId)}`, { accessToken });
 }
@@ -236,6 +280,7 @@ function mapPaymentStatus(status) {
 }
 
 module.exports = {
+  createCheckoutPreference,
   createPixPayment,
   getMercadoPagoCredentialsForAccount,
   getPayment,

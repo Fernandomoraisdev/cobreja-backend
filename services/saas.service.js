@@ -101,6 +101,20 @@ const DEFAULT_PLANS = [
   },
 ];
 
+const freePlanDefinition = DEFAULT_PLANS.find((plan) => plan.code === 'FREE');
+if (freePlanDefinition) {
+  freePlanDefinition.name = 'Gratis';
+  freePlanDefinition.description =
+    'Plano gratis por 30 dias para comecar a operar com ate 10 clientes.';
+  freePlanDefinition.features = [
+    'Gratis por 30 dias',
+    'Ate 10 clientes ativos',
+    'Controle de dividas e parcelas',
+    'Portal do cliente',
+    'Depois taxa minima de R$ 19,90',
+  ];
+}
+
 const LEGACY_PLAN_CODE_MAP = {
   trial: 'FREE',
   pro: 'SEMESTRAL',
@@ -159,10 +173,21 @@ function diffDays(from, to = new Date()) {
 function buildBillingStatus(subscription, now = new Date()) {
   const plan = subscription?.plan;
   const end = subscription?.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
+  const trialEnd = subscription?.trialEndsAt ? new Date(subscription.trialEndsAt) : null;
+  const trialExpired = Boolean(
+    subscription?.status === 'TRIAL' &&
+      trialEnd &&
+      trialEnd.getTime() < now.getTime(),
+  );
   const freeOrLifetime = !plan || isFreePlan(plan) || isLifetimePlan(plan);
   const isExpired = Boolean(end && end.getTime() < now.getTime());
-  const daysPastDue = isExpired ? Math.max(diffDays(end, now), 0) : 0;
-  const isPastDue = subscription?.status === 'PAST_DUE' || (isExpired && !freeOrLifetime);
+  const daysPastDue = trialExpired
+    ? Math.max(diffDays(trialEnd, now), 0)
+    : isExpired
+      ? Math.max(diffDays(end, now), 0)
+      : 0;
+  const isPastDue =
+    subscription?.status === 'PAST_DUE' || trialExpired || (isExpired && !freeOrLifetime);
   const accessBlocked = isPastDue && daysPastDue > DEFAULT_SAAS_GRACE_DAYS;
 
   return {
@@ -175,6 +200,7 @@ function buildBillingStatus(subscription, now = new Date()) {
     accessBlocked,
     renewRequired: isPastDue,
     currentPeriodEnd: subscription?.currentPeriodEnd || null,
+    trialEndsAt: subscription?.trialEndsAt || null,
     pendingChangeAt: subscription?.pendingChangeAt || null,
     pendingPlan: serializePlan(subscription?.pendingPlan),
   };
@@ -330,7 +356,7 @@ async function ensureAccountSubscription(accountId) {
   const existing = await prisma.subscription.findFirst({
     where: {
       accountId,
-      status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE'] },
+      status: { in: ['TRIAL', 'ACTIVE', 'PAST_DUE', 'PENDING_PAYMENT'] },
     },
     include: { plan: true, pendingPlan: true },
     orderBy: { createdAt: 'desc' },
@@ -660,6 +686,31 @@ async function applySaasPaymentResult({
     planId: intent.planId,
     externalProvider: 'MERCADO_PAGO',
     externalId: mercadoPagoPaymentId ? String(mercadoPagoPaymentId) : intent.mercadoPagoPaymentId,
+  });
+
+  const settings = await prisma.accountSettings.findUnique({
+    where: { accountId: intent.accountId },
+    select: { saas: true },
+  });
+  const currentSaas = settings?.saas && typeof settings.saas === 'object' ? settings.saas : {};
+  await prisma.accountSettings.upsert({
+    where: { accountId: intent.accountId },
+    update: {
+      saas: {
+        ...currentSaas,
+        accountStatus: 'ACTIVE',
+        activatedAt: approvedAt.toISOString(),
+        lastPaymentProvider: 'MERCADO_PAGO',
+      },
+    },
+    create: {
+      accountId: intent.accountId,
+      saas: {
+        accountStatus: 'ACTIVE',
+        activatedAt: approvedAt.toISOString(),
+        lastPaymentProvider: 'MERCADO_PAGO',
+      },
+    },
   });
 
   await prisma.saasPaymentIntent.update({
