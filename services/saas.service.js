@@ -101,6 +101,16 @@ const DEFAULT_PLANS = [
   },
 ];
 
+const LEGACY_PLAN_CODE_MAP = {
+  trial: 'FREE',
+  pro: 'SEMESTRAL',
+  premium: 'ANUAL',
+  STARTER: 'MENSAL',
+  PRO: 'SEMESTRAL',
+  BUSINESS: 'ANUAL',
+  LIFETIME: 'VITALICIO',
+};
+
 function addDays(date, days) {
   const result = new Date(date);
   result.setDate(result.getDate() + days);
@@ -262,11 +272,39 @@ async function ensureDefaultPlans() {
     plans.push(saved);
   }
 
+  const plansByCode = new Map(plans.map((plan) => [plan.code, plan]));
+  const legacyCodes = Object.keys(LEGACY_PLAN_CODE_MAP);
+  const legacyPlans = await prisma.plan.findMany({
+    where: { code: { in: legacyCodes } },
+    select: { id: true, code: true },
+  });
+
+  for (const legacyPlan of legacyPlans) {
+    const targetCode = LEGACY_PLAN_CODE_MAP[legacyPlan.code];
+    const targetPlan = plansByCode.get(targetCode);
+    if (!targetPlan) continue;
+
+    await prisma.subscription.updateMany({
+      where: { planId: legacyPlan.id },
+      data: { planId: targetPlan.id },
+    });
+
+    await prisma.subscription.updateMany({
+      where: { pendingPlanId: legacyPlan.id },
+      data: { pendingPlanId: targetPlan.id },
+    });
+
+    await prisma.saasPaymentIntent.updateMany({
+      where: { planId: legacyPlan.id },
+      data: { planId: targetPlan.id },
+    });
+  }
+
   await prisma.plan.updateMany({
     where: {
       AND: [
         { code: { notIn: activeCodes } },
-        { code: { in: ['STARTER', 'PRO', 'BUSINESS', 'LIFETIME'] } },
+        { code: { in: legacyCodes } },
       ],
     },
     data: { isActive: false, isPublic: false },
