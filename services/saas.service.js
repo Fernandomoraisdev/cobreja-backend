@@ -378,7 +378,7 @@ async function ensureAccountSubscription(accountId) {
 }
 
 async function getSaasOverview(accountId) {
-  const [plans, subscription, activeClients, planPayments] = await Promise.all([
+  const [plans, subscription, activeClients, planPayments, settings] = await Promise.all([
     ensureDefaultPlans(),
     ensureAccountSubscription(accountId),
     getActiveClientCount(accountId),
@@ -387,6 +387,10 @@ async function getSaasOverview(accountId) {
       include: { plan: true },
       orderBy: { createdAt: 'desc' },
       take: 10,
+    }),
+    prisma.accountSettings.findUnique({
+      where: { accountId: Number(accountId) },
+      select: { saas: true, company: true, mercadoPago: true },
     }),
   ]);
 
@@ -429,6 +433,51 @@ async function getSaasOverview(accountId) {
       limitReached: limit != null && activeClients >= limit,
       usagePercent: limit == null ? 0 : Math.min(Math.round((activeClients / limit) * 100), 100),
     },
+    onboarding: buildOnboardingStatus({
+      settings,
+      activeClients,
+      planPayments,
+    }),
+  };
+}
+
+function buildOnboardingStatus({ settings, activeClients, planPayments }) {
+  const saas = settings?.saas && typeof settings.saas === 'object' ? settings.saas : {};
+  const saved = saas.onboardingStatus && typeof saas.onboardingStatus === 'object'
+    ? saas.onboardingStatus
+    : {};
+  const company = settings?.company && typeof settings.company === 'object' ? settings.company : {};
+  const mercadoPago =
+    settings?.mercadoPago && typeof settings.mercadoPago === 'object' ? settings.mercadoPago : {};
+  const steps = [
+    {
+      key: 'CONFIGURE_COMPANY',
+      title: 'Configurar empresa',
+      done: saved.companyConfigured === true || Boolean(company.name || company.cnpj || company.email),
+    },
+    {
+      key: 'CONNECT_MERCADO_PAGO',
+      title: 'Conectar Mercado Pago',
+      done: saved.mercadoPagoConnected === true || mercadoPago.useAccountCredentials === true,
+    },
+    {
+      key: 'CREATE_FIRST_CLIENT',
+      title: 'Criar primeiro cliente',
+      done: saved.firstClientCreated === true || Number(activeClients || 0) > 0,
+    },
+    {
+      key: 'CREATE_FIRST_CHARGE',
+      title: 'Criar primeira cobranca',
+      done: saved.firstChargeCreated === true || (planPayments || []).some((intent) => intent.status === 'APPROVED'),
+    },
+  ];
+  const completed = steps.filter((step) => step.done).length;
+  return {
+    completed,
+    total: steps.length,
+    progress: steps.length ? Math.round((completed / steps.length) * 100) : 0,
+    complete: completed === steps.length,
+    steps,
   };
 }
 
