@@ -309,8 +309,101 @@ async function getRenegotiationsByClient(req, res) {
   }
 }
 
+async function cancelRenegotiation(req, res) {
+  try {
+    const renegotiationId = Number(req.params.id);
+    if (!renegotiationId) {
+      return res.status(400).json({ message: 'ID da renegociacao invalido', data: {} });
+    }
+
+    const existing = await prisma.renegotiation.findFirst({
+      where: {
+        id: renegotiationId,
+        accountId: req.user.accountId,
+      },
+      include: {
+        debts: true,
+        installments: true,
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ message: 'Renegociacao nao encontrada', data: {} });
+    }
+
+    if (existing.status !== 'ACTIVE') {
+      return res.status(409).json({
+        message: 'Somente renegociacoes ativas podem ser canceladas',
+        data: serializeRenegotiation(existing),
+      });
+    }
+
+    const sourceDebtIds = Array.isArray(existing.sourceDebtIds)
+      ? existing.sourceDebtIds.map((item) => Number(item)).filter(Boolean)
+      : [];
+
+    const cancelled = await prisma.$transaction(async (tx) => {
+      await tx.renegotiation.update({
+        where: { id: existing.id },
+        data: {
+          status: 'CANCELLED',
+          completedAt: new Date(),
+        },
+      });
+
+      await tx.debt.updateMany({
+        where: {
+          renegotiationId: existing.id,
+          accountId: req.user.accountId,
+          kind: 'RENEGOTIATED',
+          status: 'ACTIVE',
+        },
+        data: {
+          status: 'EXCLUDED',
+          deletedAt: new Date(),
+        },
+      });
+
+      if (sourceDebtIds.length) {
+        await tx.debt.updateMany({
+          where: {
+            id: { in: sourceDebtIds },
+            accountId: req.user.accountId,
+            status: 'RENEGOTIATED',
+          },
+          data: {
+            status: 'ACTIVE',
+          },
+        });
+      }
+
+      return tx.renegotiation.findUnique({
+        where: { id: existing.id },
+        include: {
+          client: true,
+          debts: {
+            orderBy: { createdAt: 'desc' },
+          },
+          installments: {
+            orderBy: { installmentNumber: 'asc' },
+          },
+        },
+      });
+    });
+
+    return res.json({
+      message: 'Renegociacao cancelada e dividas originais reativadas',
+      data: serializeRenegotiation(cancelled),
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao cancelar renegociacao', data: {} });
+  }
+}
+
 module.exports = {
   createRenegotiation,
   getRenegotiations,
   getRenegotiationsByClient,
+  cancelRenegotiation,
 };
