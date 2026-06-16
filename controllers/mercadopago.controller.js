@@ -140,6 +140,9 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
       payments: {
         orderBy: { paidAt: 'asc' },
       },
+      splits: {
+        orderBy: { splitNumber: 'asc' },
+      },
     },
     orderBy: { installmentNumber: 'asc' },
   });
@@ -170,6 +173,31 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
           (left, right) => new Date(right.paidAt).getTime() - new Date(left.paidAt).getTime(),
         )[0]
       : null;
+
+    let remainingForSplits = totalPaid;
+    for (const split of installment.splits || []) {
+      const splitAmount = Number(split.amount || 0);
+      const splitPaid = roundMoney(Math.min(splitAmount, Math.max(0, remainingForSplits)));
+      remainingForSplits = roundMoney(Math.max(0, remainingForSplits - splitPaid));
+
+      let splitStatus = 'PENDING';
+      if (splitPaid <= MONEY_EPSILON) {
+        splitStatus = new Date(split.dueDate) < today ? 'OVERDUE' : 'PENDING';
+      } else if (splitPaid + MONEY_EPSILON < splitAmount) {
+        splitStatus = 'PARTIAL';
+      } else {
+        splitStatus = 'PAID';
+      }
+
+      await tx.installmentSplit.update({
+        where: { id: split.id },
+        data: {
+          paidAmount: splitPaid,
+          paidAt: splitStatus === 'PAID' ? (latestPayment ? latestPayment.paidAt : new Date()) : null,
+          status: splitStatus,
+        },
+      });
+    }
 
     await tx.installment.update({
       where: { id: installment.id },

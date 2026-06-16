@@ -23,6 +23,19 @@ function serializeInstallment(installment) {
     note: installment.note,
     debtId: installment.debtId,
     renegotiationId: installment.renegotiationId,
+    splits: (installment.splits || []).map((split) => ({
+      id: split.id,
+      splitNumber: split.splitNumber,
+      amount: split.amount,
+      paidAmount: split.paidAmount,
+      dueDate: split.dueDate,
+      paidAt: split.paidAt,
+      status: split.status,
+      note: split.note,
+      installmentId: split.installmentId,
+      createdAt: split.createdAt,
+      updatedAt: split.updatedAt,
+    })),
     createdAt: installment.createdAt,
     updatedAt: installment.updatedAt,
   };
@@ -80,6 +93,66 @@ function buildInstallmentSchedule(firstDueDate, installmentCount, installmentAmo
   return installments;
 }
 
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function buildSplitDueDate(installmentDueDate, dayOfMonth) {
+  const base = new Date(installmentDueDate);
+  const safeDay = Math.max(
+    1,
+    Math.min(Number(dayOfMonth || base.getDate()), daysInMonth(base.getFullYear(), base.getMonth())),
+  );
+  return new Date(
+    base.getFullYear(),
+    base.getMonth(),
+    safeDay,
+    base.getHours(),
+    base.getMinutes(),
+    base.getSeconds(),
+    base.getMilliseconds(),
+  );
+}
+
+function normalizeSplitPayments(raw) {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((item, index) => ({
+      splitNumber: index + 1,
+      dayOfMonth: Number(item.dayOfMonth || item.day || 0),
+      amount: item.amount !== undefined ? Number(item.amount) : null,
+    }))
+    .filter((item) => item.dayOfMonth >= 1 && item.dayOfMonth <= 31);
+}
+
+function buildInstallmentSplits({ installment, splitPayments }) {
+  if (!splitPayments.length) return [];
+
+  const manualTotal = roundMoney(
+    splitPayments.reduce((sum, item) => sum + (item.amount && item.amount > 0 ? item.amount : 0), 0),
+  );
+  let accumulated = 0;
+
+  return splitPayments.map((item, index) => {
+    let amount;
+    if (manualTotal > 0) {
+      amount = item.amount && item.amount > 0 ? roundMoney(item.amount) : 0;
+    } else {
+      amount = index === splitPayments.length - 1
+        ? roundMoney(installment.amount - accumulated)
+        : roundMoney(installment.amount / splitPayments.length);
+    }
+    accumulated = roundMoney(accumulated + amount);
+
+    return {
+      splitNumber: item.splitNumber,
+      amount,
+      dueDate: buildSplitDueDate(installment.dueDate, item.dayOfMonth),
+    };
+  });
+}
+
 async function createRenegotiation(req, res) {
   try {
     const clientId = Number(req.body.clientId);
@@ -104,6 +177,7 @@ async function createRenegotiation(req, res) {
       ? Number(req.body.dailyInterestValue)
       : null;
     const note = req.body.note ? String(req.body.note).trim() : null;
+    const splitPayments = normalizeSplitPayments(req.body.splitPayments);
 
     if (!clientId || !installmentCount || !firstDueDate) {
       return res.status(400).json({
@@ -209,7 +283,7 @@ async function createRenegotiation(req, res) {
       });
 
       for (const item of schedule) {
-        await tx.installment.create({
+        const installment = await tx.installment.create({
           data: {
             installmentNumber: item.installmentNumber,
             amount: item.amount,
@@ -221,6 +295,25 @@ async function createRenegotiation(req, res) {
             debtId: renegotiatedDebt.id,
           },
         });
+
+        const splits = buildInstallmentSplits({
+          installment,
+          splitPayments,
+        });
+
+        for (const split of splits) {
+          await tx.installmentSplit.create({
+            data: {
+              splitNumber: split.splitNumber,
+              amount: split.amount,
+              dueDate: split.dueDate,
+              status: 'PENDING',
+              clientId,
+              accountId: req.user.accountId,
+              installmentId: installment.id,
+            },
+          });
+        }
       }
 
       return tx.renegotiation.findUnique({
@@ -231,6 +324,11 @@ async function createRenegotiation(req, res) {
             orderBy: { createdAt: 'desc' },
           },
           installments: {
+            include: {
+              splits: {
+                orderBy: { splitNumber: 'asc' },
+              },
+            },
             orderBy: { installmentNumber: 'asc' },
           },
         },
@@ -259,6 +357,11 @@ async function getRenegotiations(req, res) {
           orderBy: { createdAt: 'desc' },
         },
         installments: {
+          include: {
+            splits: {
+              orderBy: { splitNumber: 'asc' },
+            },
+          },
           orderBy: { installmentNumber: 'asc' },
         },
       },
@@ -293,6 +396,11 @@ async function getRenegotiationsByClient(req, res) {
           orderBy: { createdAt: 'desc' },
         },
         installments: {
+          include: {
+            splits: {
+              orderBy: { splitNumber: 'asc' },
+            },
+          },
           orderBy: { installmentNumber: 'asc' },
         },
       },
@@ -384,9 +492,14 @@ async function cancelRenegotiation(req, res) {
           debts: {
             orderBy: { createdAt: 'desc' },
           },
-          installments: {
-            orderBy: { installmentNumber: 'asc' },
+        installments: {
+          include: {
+            splits: {
+              orderBy: { splitNumber: 'asc' },
+            },
           },
+          orderBy: { installmentNumber: 'asc' },
+        },
         },
       });
     });

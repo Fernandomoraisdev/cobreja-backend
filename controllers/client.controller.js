@@ -20,12 +20,22 @@ const baseClientInclude = {
         orderBy: { createdAt: 'desc' },
       },
       installments: {
+        include: {
+          splits: {
+            orderBy: { splitNumber: 'asc' },
+          },
+        },
         orderBy: { installmentNumber: 'asc' },
       },
     },
     orderBy: { createdAt: 'desc' },
   },
   installments: {
+    include: {
+      splits: {
+        orderBy: { splitNumber: 'asc' },
+      },
+    },
     orderBy: [{ dueDate: 'desc' }, { installmentNumber: 'desc' }],
   },
 };
@@ -87,6 +97,22 @@ function serializeInstallment(installment) {
     clientId: installment.clientId,
     debtId: installment.debtId,
     renegotiationId: installment.renegotiationId,
+    splits: (installment.splits || []).map((split) => ({
+      id: split.id,
+      splitNumber: split.splitNumber,
+      amount: split.amount,
+      paidAmount: split.paidAmount,
+      remainingAmount: roundMoney(
+        Math.max(Number(split.amount || 0) - Number(split.paidAmount || 0), 0),
+      ),
+      dueDate: split.dueDate,
+      paidAt: split.paidAt,
+      status: split.status,
+      note: split.note,
+      installmentId: split.installmentId,
+      createdAt: split.createdAt,
+      updatedAt: split.updatedAt,
+    })),
     createdAt: installment.createdAt,
     updatedAt: installment.updatedAt,
   };
@@ -116,7 +142,20 @@ function serializeRenegotiation(renegotiation) {
 }
 
 function serializeClient(client, { includeCollections = true } = {}) {
-  const debts = (client.debts || []).map((debt) => enrichDebt(debt));
+  const installmentsByDebt = new Map();
+  for (const installment of client.installments || []) {
+    const debtId = installment.debtId;
+    if (!debtId) continue;
+    if (!installmentsByDebt.has(debtId)) {
+      installmentsByDebt.set(debtId, []);
+    }
+    installmentsByDebt.get(debtId).push(serializeInstallment(installment));
+  }
+
+  const debts = (client.debts || []).map((debt) => ({
+    ...enrichDebt(debt),
+    installments: installmentsByDebt.get(debt.id) || [],
+  }));
   const payments = (client.payments || []).map(serializePayment);
   const renegotiations = (client.renegotiations || []).map(serializeRenegotiation);
   const installments = (client.installments || []).map(serializeInstallment);

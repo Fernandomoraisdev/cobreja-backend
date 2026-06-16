@@ -94,6 +94,7 @@ model Account {
   webhookLogs    WebhookLog[]
   renegotiations Renegotiation[]
   installments   Installment[]
+  installmentSplits InstallmentSplit[]
 
   creditRequests CreditRequest[]
 
@@ -304,6 +305,7 @@ model Client {
   paymentIntents PaymentIntent[]
   renegotiations Renegotiation[]
   installments   Installment[]
+  installmentSplits InstallmentSplit[]
   creditRequests CreditRequest[]
   supportConversations SupportConversation[]
   supportMessages SupportMessage[]
@@ -415,12 +417,40 @@ model Installment {
 
   payments    Payment[]
   paymentIntents PaymentIntent[]
+  splits      InstallmentSplit[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([renegotiationId, installmentNumber])
   @@index([accountId, status])
+}
+
+model InstallmentSplit {
+  id          Int               @id @default(autoincrement())
+  splitNumber Int
+  amount      Float
+  paidAmount  Float             @default(0)
+  dueDate     DateTime
+  paidAt      DateTime?
+  status      InstallmentStatus @default(PENDING)
+  note        String?
+
+  installmentId Int
+  installment   Installment @relation(fields: [installmentId], references: [id], onDelete: Cascade)
+
+  clientId    Int
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  accountId   Int
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([installmentId, splitNumber])
+  @@index([accountId, status])
+  @@index([clientId, dueDate])
 }
 
 model CreditRequest {
