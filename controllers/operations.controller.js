@@ -82,6 +82,27 @@ function buildScopedWhere(accountId) {
   return accountId ? { accountId } : {};
 }
 
+function tableRows(payload, name) {
+  const rows = payload?.tables?.[name];
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function createManyIfAny(tx, modelName, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return 0;
+  const result = await tx[modelName].createMany({ data: rows });
+  return result.count || 0;
+}
+
+async function resetSequence(tx, tableName, columnName = 'id') {
+  await tx.$executeRawUnsafe(`
+    SELECT setval(
+      pg_get_serial_sequence('"${tableName}"', '${columnName}'),
+      COALESCE((SELECT MAX("${columnName}") FROM "${tableName}"), 1),
+      (SELECT COUNT(*) > 0 FROM "${tableName}")
+    )
+  `);
+}
+
 async function countOrNull(modelName, where = {}) {
   try {
     return await prisma[modelName].count({ where });
@@ -177,6 +198,7 @@ async function exportOperationsBackup(req, res) {
       debts,
       renegotiations,
       installments,
+      installmentSplits,
       creditRequests,
       payments,
       paymentIntents,
@@ -195,6 +217,7 @@ async function exportOperationsBackup(req, res) {
       prisma.debt.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
       prisma.renegotiation.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
       prisma.installment.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
+      prisma.installmentSplit.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
       prisma.creditRequest.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
       prisma.payment.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
       prisma.paymentIntent.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
@@ -213,7 +236,7 @@ async function exportOperationsBackup(req, res) {
         generatedByEmail: req.user?.email || null,
         scope: accountId ? 'ACCOUNT' : 'GLOBAL',
         accountId,
-        containsPasswords: false,
+        containsPasswords: true,
         containsRawMercadoPagoSecrets: false,
       },
       counts: {
@@ -227,6 +250,7 @@ async function exportOperationsBackup(req, res) {
         debts: debts.length,
         renegotiations: renegotiations.length,
         installments: installments.length,
+        installmentSplits: installmentSplits.length,
         creditRequests: creditRequests.length,
         payments: payments.length,
         paymentIntents: paymentIntents.length,
@@ -241,11 +265,12 @@ async function exportOperationsBackup(req, res) {
         plans,
         subscriptions,
         saasPaymentIntents,
-        users: users.map(sanitizeUser),
+        users,
         clients,
         debts,
         renegotiations,
         installments,
+        installmentSplits,
         creditRequests,
         payments,
         paymentIntents,
@@ -279,7 +304,174 @@ async function exportOperationsBackup(req, res) {
   }
 }
 
+async function restoreOperationsBackup(req, res) {
+  const payload = req.body?.backup && typeof req.body.backup === 'object'
+    ? req.body.backup
+    : req.body;
+
+  if (!payload || typeof payload !== 'object' || !payload.tables) {
+    return res.status(400).json({
+      error: 'Backup invalido. Envie o JSON gerado pelo backup operacional.',
+    });
+  }
+
+  if (payload.metadata?.type !== 'logical-backup') {
+    return res.status(400).json({
+      error: 'Backup invalido ou incompatível.',
+    });
+  }
+
+  if (payload.metadata?.scope && payload.metadata.scope !== 'GLOBAL') {
+    return res.status(400).json({
+      error: 'Restauracao automatica aceita apenas backup global.',
+    });
+  }
+
+  const users = tableRows(payload, 'users');
+  if (users.some((user) => !user.password)) {
+    return res.status(400).json({
+      error: 'Este backup nao contem senhas. Gere um backup novo antes de restaurar.',
+    });
+  }
+
+  try {
+    const restored = await prisma.$transaction(async (tx) => {
+      await tx.paymentIntent.deleteMany({});
+      await tx.payment.deleteMany({});
+      await tx.installmentSplit.deleteMany({});
+      await tx.installment.deleteMany({});
+      await tx.debt.deleteMany({});
+      await tx.renegotiation.deleteMany({});
+      await tx.creditRequest.deleteMany({});
+      await tx.supportMessage.deleteMany({});
+      await tx.supportConversation.deleteMany({});
+      await tx.auditLog.deleteMany({});
+      await tx.webhookLog.deleteMany({});
+      await tx.saasPaymentIntent.deleteMany({});
+      await tx.subscription.deleteMany({});
+      await tx.accountSettings.deleteMany({});
+      await tx.client.deleteMany({});
+      await tx.user.deleteMany({});
+      await tx.account.deleteMany({});
+      await tx.plan.deleteMany({});
+
+      const counts = {};
+      counts.plans = await createManyIfAny(tx, 'plan', tableRows(payload, 'plans'));
+      counts.accounts = await createManyIfAny(tx, 'account', tableRows(payload, 'accounts'));
+      counts.users = await createManyIfAny(tx, 'user', users);
+      counts.accountSettings = await createManyIfAny(
+        tx,
+        'accountSettings',
+        tableRows(payload, 'accountSettings'),
+      );
+      counts.clients = await createManyIfAny(tx, 'client', tableRows(payload, 'clients'));
+      counts.subscriptions = await createManyIfAny(
+        tx,
+        'subscription',
+        tableRows(payload, 'subscriptions'),
+      );
+      counts.renegotiations = await createManyIfAny(
+        tx,
+        'renegotiation',
+        tableRows(payload, 'renegotiations'),
+      );
+      counts.debts = await createManyIfAny(tx, 'debt', tableRows(payload, 'debts'));
+      counts.installments = await createManyIfAny(
+        tx,
+        'installment',
+        tableRows(payload, 'installments'),
+      );
+      counts.installmentSplits = await createManyIfAny(
+        tx,
+        'installmentSplit',
+        tableRows(payload, 'installmentSplits'),
+      );
+      counts.payments = await createManyIfAny(tx, 'payment', tableRows(payload, 'payments'));
+      counts.paymentIntents = await createManyIfAny(
+        tx,
+        'paymentIntent',
+        tableRows(payload, 'paymentIntents'),
+      );
+      counts.saasPaymentIntents = await createManyIfAny(
+        tx,
+        'saasPaymentIntent',
+        tableRows(payload, 'saasPaymentIntents'),
+      );
+      counts.creditRequests = await createManyIfAny(
+        tx,
+        'creditRequest',
+        tableRows(payload, 'creditRequests'),
+      );
+      counts.webhookLogs = await createManyIfAny(
+        tx,
+        'webhookLog',
+        tableRows(payload, 'webhookLogs'),
+      );
+      counts.supportConversations = await createManyIfAny(
+        tx,
+        'supportConversation',
+        tableRows(payload, 'supportConversations'),
+      );
+      counts.supportMessages = await createManyIfAny(
+        tx,
+        'supportMessage',
+        tableRows(payload, 'supportMessages'),
+      );
+      counts.auditLogs = await createManyIfAny(tx, 'auditLog', tableRows(payload, 'auditLogs'));
+
+      const tableNames = [
+        'Plan',
+        'Account',
+        'User',
+        'AccountSettings',
+        'Subscription',
+        'SaasPaymentIntent',
+        'AuditLog',
+        'SupportConversation',
+        'SupportMessage',
+        'Client',
+        'Debt',
+        'Renegotiation',
+        'Installment',
+        'InstallmentSplit',
+        'CreditRequest',
+        'Payment',
+        'PaymentIntent',
+        'WebhookLog',
+      ];
+      for (const tableName of tableNames) {
+        await resetSequence(tx, tableName);
+      }
+
+      return counts;
+    }, { timeout: 60000 });
+
+    await writeAuditLog({
+      req,
+      action: 'OPERATIONS_BACKUP_RESTORED',
+      entity: 'OperationsBackup',
+      severity: 'WARNING',
+      metadata: {
+        generatedAt: payload.metadata?.generatedAt || null,
+        restored,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      message: 'Backup restaurado com sucesso.',
+      counts: restored,
+    });
+  } catch (err) {
+    console.error('Erro ao restaurar backup operacional:', err);
+    return res.status(500).json({
+      error: 'Nao foi possivel restaurar o backup operacional.',
+    });
+  }
+}
+
 module.exports = {
   getOperationsHealth,
   exportOperationsBackup,
+  restoreOperationsBackup,
 };
