@@ -1,4 +1,4 @@
-﻿const prisma = require('../prisma');
+const prisma = require('../prisma');
 const {
   MONEY_EPSILON,
   buildDebtUpdateFromState,
@@ -24,6 +24,14 @@ function splitName(name) {
   if (!parts.length) return { firstName: 'Cliente', lastName: 'Peguei & Paguei' };
   if (parts.length === 1) return { firstName: parts[0], lastName: 'Peguei & Paguei' };
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
+
+function installmentPrincipalPaid(payment) {
+  const principalAmount = Number(payment.principalAmount || 0);
+  if (principalAmount > MONEY_EPSILON) return principalAmount;
+  return String(payment.type || '').toUpperCase() === 'PARCELA'
+    ? Number(payment.amount || 0)
+    : 0;
 }
 
 function serializeIntent(intent) {
@@ -153,7 +161,7 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
   for (const installment of installments) {
     const totalPaid = roundMoney(
       (installment.payments || []).reduce(
-        (sum, payment) => sum + Number(payment.amount || 0),
+        (sum, payment) => sum + installmentPrincipalPaid(payment),
         0,
       ),
     );
@@ -1063,3 +1071,4 @@ module.exports = {
   getPixIntentStatus,
   mercadoPagoWebhook,
 };
+

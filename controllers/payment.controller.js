@@ -27,6 +27,14 @@ function normalizePaymentType(value) {
   return null;
 }
 
+function installmentPrincipalPaid(payment) {
+  const principalAmount = Number(payment.principalAmount || 0);
+  if (principalAmount > MONEY_EPSILON) return principalAmount;
+  return String(payment.type || '').toUpperCase() === 'PARCELA'
+    ? Number(payment.amount || 0)
+    : 0;
+}
+
 function serializePayment(payment) {
   return {
     id: payment.id,
@@ -91,11 +99,12 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
 
   const today = new Date();
   let paidInstallments = 0;
+  let nextOpenInstallment = null;
 
   for (const installment of installments) {
     const totalPaid = roundMoney(
       (installment.payments || []).reduce(
-        (sum, payment) => sum + Number(payment.amount || 0),
+        (sum, payment) => sum + installmentPrincipalPaid(payment),
         0,
       ),
     );
@@ -108,6 +117,10 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
     } else {
       status = 'PAID';
       paidInstallments += 1;
+    }
+
+    if (status !== 'PAID' && !nextOpenInstallment) {
+      nextOpenInstallment = installment;
     }
 
     const latestPayment = (installment.payments || []).length
@@ -160,6 +173,25 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
       completedAt: allPaid ? new Date() : null,
     },
   });
+
+  const renegotiatedDebts = await tx.debt.findMany({
+    where: {
+      renegotiationId,
+      kind: 'RENEGOTIATED',
+      deletedAt: null,
+    },
+  });
+
+  for (const debt of renegotiatedDebts) {
+    await tx.debt.update({
+      where: { id: debt.id },
+      data: {
+        dueDate: nextOpenInstallment ? nextOpenInstallment.dueDate : debt.dueDate,
+        status: allPaid ? 'SETTLED' : debt.status,
+        settledAt: allPaid ? new Date() : debt.settledAt,
+      },
+    });
+  }
 }
 
 async function recalculateDebtAndRelations(tx, debtId) {
@@ -303,24 +335,76 @@ async function createPayment(req, res) {
         throw new Error('DIVIDA_NAO_ENCONTRADA');
       }
 
-      const payment = await tx.payment.create({
-        data: {
+      const paymentsToCreate = [];
+
+      if (target.installment && type === 'PARCIAL') {
+        const existingPayments = await tx.payment.findMany({
+          where: {
+            installmentId: target.installment.id,
+            accountId: req.user.accountId,
+          },
+        });
+        const alreadyPaidPrincipal = roundMoney(
+          existingPayments.reduce(
+            (sum, payment) => sum + installmentPrincipalPaid(payment),
+            0,
+          ),
+        );
+        const principalNeeded = roundMoney(
+          Math.max(Number(target.installment.amount || 0) - alreadyPaidPrincipal, 0),
+        );
+        const principalForInstallment = roundMoney(Math.min(amount, principalNeeded));
+        const extraForCharges = roundMoney(Math.max(amount - principalForInstallment, 0));
+
+        if (extraForCharges > MONEY_EPSILON) {
+          paymentsToCreate.push({
+            type: 'PARCIAL',
+            amount: extraForCharges,
+            installmentId: target.installment.id,
+            note: note ? `${note} (diaria/juros)` : 'Diaria/juros da parcela renegociada',
+          });
+        }
+
+        if (principalForInstallment > MONEY_EPSILON) {
+          paymentsToCreate.push({
+            type: 'PARCELA',
+            amount: principalForInstallment,
+            installmentId: target.installment.id,
+            note: note ? `${note} (principal da parcela)` : 'Principal da parcela renegociada',
+          });
+        }
+      }
+
+      if (!paymentsToCreate.length) {
+        paymentsToCreate.push({
           type,
           amount,
-          clientId,
-          debtId: target.debt.id,
           installmentId: target.installment ? target.installment.id : null,
-          accountId: req.user.accountId,
-          paidAt,
           note,
-          receiptUrl,
-        },
-        include: {
-          client: true,
-          debt: true,
-          installment: true,
-        },
-      });
+        });
+      }
+
+      let payment = null;
+      for (const item of paymentsToCreate) {
+        payment = await tx.payment.create({
+          data: {
+            type: item.type,
+            amount: item.amount,
+            clientId,
+            debtId: target.debt.id,
+            installmentId: item.installmentId,
+            accountId: req.user.accountId,
+            paidAt,
+            note: item.note,
+            receiptUrl,
+          },
+          include: {
+            client: true,
+            debt: true,
+            installment: true,
+          },
+        });
+      }
 
       await recalculateDebtAndRelations(tx, target.debt.id);
 
@@ -721,3 +805,4 @@ module.exports = {
   getPaymentHistory,
   getPaymentHistoryByClient,
 };
+

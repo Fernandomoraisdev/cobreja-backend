@@ -281,9 +281,13 @@ function applyPaymentToState(state, payment) {
 function simulatePaymentsForDebt(debt, payments) {
   const state = toReplayState(debt);
   const ordered = [...payments].sort(
-    (left, right) =>
-      new Date(left.paidAt || left.createdAt || new Date()).getTime() -
-      new Date(right.paidAt || right.createdAt || new Date()).getTime(),
+    (left, right) => {
+      const dateCompare =
+        new Date(left.paidAt || left.createdAt || new Date()).getTime() -
+        new Date(right.paidAt || right.createdAt || new Date()).getTime();
+      if (dateCompare !== 0) return dateCompare;
+      return Number(left.id || 0) - Number(right.id || 0);
+    },
   );
 
   const computedPayments = ordered.map((payment) => {

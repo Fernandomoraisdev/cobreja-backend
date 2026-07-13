@@ -165,6 +165,9 @@ function serializeClient(client, { includeCollections = true } = {}) {
   const overdueDebts = activeDebts.filter((debt) => debt.snapshot.isOverdue);
   const dueTodayDebts = activeDebts.filter((debt) => debt.snapshot.dueToday);
   const renegotiatedDebts = activeDebts.filter((debt) => debt.kind === 'RENEGOTIATED');
+  const frozenRenegotiatedDebts = debts.filter(
+    (debt) => debt.status === 'RENEGOTIATED' && debt.kind !== 'RENEGOTIATED',
+  );
   const totalOpen = roundMoney(
     activeDebts.reduce((sum, debt) => sum + debt.snapshot.totalDue, 0),
   );
@@ -190,6 +193,7 @@ function serializeClient(client, { includeCollections = true } = {}) {
       overdueDebtCount: overdueDebts.length,
       dueTodayCount: dueTodayDebts.length,
       renegotiatedDebtCount: renegotiatedDebts.length,
+      frozenDebtCount: frozenRenegotiatedDebts.length,
       jurosPaymentsCount: payments.filter((payment) => payment.type === 'JUROS').length,
       installmentPaymentsCount: payments.filter((payment) => payment.type === 'PARCELA').length,
     },
@@ -198,7 +202,9 @@ function serializeClient(client, { includeCollections = true } = {}) {
       devendo: client.status !== 'EXCLUDED' && activeDebts.length > 0,
       emAtraso: client.status !== 'EXCLUDED' && overdueDebts.length > 0,
       venceHoje: client.status !== 'EXCLUDED' && dueTodayDebts.length > 0,
-      renegociados: client.status !== 'EXCLUDED' && renegotiatedDebts.length > 0,
+      renegociados:
+        client.status !== 'EXCLUDED' &&
+        (renegotiatedDebts.length > 0 || frozenRenegotiatedDebts.length > 0),
       quitados:
         client.status !== 'EXCLUDED' && activeDebts.length === 0 && settledDebts.length > 0,
       jurosPagos: payments.some((payment) => payment.type === 'JUROS'),
