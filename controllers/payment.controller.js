@@ -27,6 +27,20 @@ function normalizePaymentType(value) {
   return null;
 }
 
+function assertValidPaymentInput({ amount, paidAt }) {
+  if (!Number.isFinite(amount) || amount <= MONEY_EPSILON) {
+    const err = new Error('VALOR_INVALIDO');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!(paidAt instanceof Date) || Number.isNaN(paidAt.getTime())) {
+    const err = new Error('DATA_INVALIDA');
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 function installmentPrincipalPaid(payment) {
   const principalAmount = Number(payment.principalAmount || 0);
   if (principalAmount > MONEY_EPSILON) return principalAmount;
@@ -257,6 +271,16 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
       return { debt: null, installment: null };
     }
 
+    if (installment.status === 'PAID') {
+      const err = new Error('PARCELA_JA_PAGA');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    if (installment.debt.deletedAt || installment.debt.status !== 'ACTIVE') {
+      return { debt: null, installment: null };
+    }
+
     return { debt: installment.debt, installment };
   }
 
@@ -266,6 +290,8 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
         id: debtId,
         clientId,
         accountId,
+        status: 'ACTIVE',
+        deletedAt: null,
       },
     });
     return { debt, installment: null };
@@ -305,6 +331,8 @@ async function createPayment(req, res) {
         data: {},
       });
     }
+
+    assertValidPaymentInput({ amount, paidAt });
 
     if (type === 'PARCELA' && !installmentId) {
       return res.status(400).json({
@@ -387,6 +415,7 @@ async function createPayment(req, res) {
         });
       }
 
+      const createdPaymentIds = [];
       let payment = null;
       for (const item of paymentsToCreate) {
         payment = await tx.payment.create({
@@ -407,53 +436,67 @@ async function createPayment(req, res) {
             installment: true,
           },
         });
+        createdPaymentIds.push(payment.id);
       }
 
       await recalculateDebtAndRelations(tx, target.debt.id);
 
-      return payment;
-    });
-
-    const refreshedPayment = await prisma.payment.findUnique({
-      where: { id: createdPayment.id },
-      include: {
-        client: true,
-        debt: true,
-        installment: true,
-      },
-    });
-
-    if (!refreshedPayment || refreshedPayment.amount <= MONEY_EPSILON) {
-      return res.status(400).json({
-        message: 'Nenhum valor aplicavel foi registrado para este pagamento',
-        data: {},
+      const refreshedPayments = await tx.payment.findMany({
+        where: { id: { in: createdPaymentIds } },
+        include: {
+          client: true,
+          debt: true,
+          installment: true,
+        },
+        orderBy: { id: 'asc' },
       });
-    }
+
+      if (
+        !refreshedPayments.length ||
+        refreshedPayments.every((item) => Number(item.amount || 0) <= MONEY_EPSILON)
+      ) {
+        throw new Error('PAGAMENTO_SEM_VALOR_APLICAVEL');
+      }
+
+      return refreshedPayments[refreshedPayments.length - 1];
+    });
 
     await writeAuditLog({
       req,
       action: 'PAYMENT_CREATED',
       entity: 'Payment',
-      entityId: refreshedPayment.id,
+      entityId: createdPayment.id,
       severity: 'INFO',
       metadata: {
-        type: refreshedPayment.type,
-        amount: refreshedPayment.amount,
-        clientId: refreshedPayment.clientId,
-        debtId: refreshedPayment.debtId,
-        installmentId: refreshedPayment.installmentId,
-        paidAt: refreshedPayment.paidAt,
+        type: createdPayment.type,
+        amount: createdPayment.amount,
+        clientId: createdPayment.clientId,
+        debtId: createdPayment.debtId,
+        installmentId: createdPayment.installmentId,
+        paidAt: createdPayment.paidAt,
       },
     });
 
     return res.status(201).json({
       message: 'Pagamento registrado com sucesso',
-      data: serializePayment(refreshedPayment),
+      data: serializePayment(createdPayment),
     });
   } catch (err) {
     console.log(err);
     if (String(err.message).includes('DIVIDA_NAO_ENCONTRADA')) {
       return res.status(404).json({ message: 'Divida nao encontrada para pagamento', data: {} });
+    }
+    if (String(err.message).includes('PARCELA_JA_PAGA')) {
+      return res.status(409).json({ message: 'Esta parcela ja esta paga', data: {} });
+    }
+    if (String(err.message).includes('PAGAMENTO_SEM_VALOR_APLICAVEL')) {
+      return res.status(400).json({ message: 'Nenhum valor aplicavel foi registrado para este pagamento', data: {} });
+    }
+    if (String(err.message).includes('VALOR_INVALIDO')) {
+      return res.status(400).json({ message: 'Informe um valor de pagamento maior que zero', data: {} });
+    }
+    if (String(err.message).includes('DATA_INVALIDA')) {
+      return res.status(400).json({ message: 'Informe uma data de pagamento valida', data: {} });
     }
     return res.status(500).json({ message: 'Erro ao registrar pagamento', data: {} });
   }
@@ -507,6 +550,7 @@ async function updatePayment(req, res) {
       : req.body.date
         ? new Date(req.body.date)
         : existingPayment.paidAt;
+    assertValidPaymentInput({ amount: nextAmount, paidAt: nextPaidAt });
     const nextNote = req.body.note !== undefined ? String(req.body.note || '').trim() || null : existingPayment.note;
     const nextReceiptUrl = req.body.receiptUrl !== undefined
       ? String(req.body.receiptUrl || '').trim() || null
@@ -576,6 +620,12 @@ async function updatePayment(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (String(err.message).includes('VALOR_INVALIDO')) {
+      return res.status(400).json({ message: 'Informe um valor de pagamento maior que zero', data: {} });
+    }
+    if (String(err.message).includes('DATA_INVALIDA')) {
+      return res.status(400).json({ message: 'Informe uma data de pagamento valida', data: {} });
+    }
     return res.status(500).json({ message: 'Erro ao atualizar pagamento', data: {} });
   }
 }

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node scripts/deploy-start.js",
+    "test": "node --test",
     "backup:deploy": "node scripts/create-backup.js PRE_DEPLOY",
     "backup:daily": "node scripts/create-backup.js AUTOMATIC_DAILY",
     "postinstall": "prisma generate"
