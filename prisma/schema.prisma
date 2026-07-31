@@ -92,6 +92,7 @@ model Account {
   paymentIntents PaymentIntent[]
   saasPaymentIntents SaasPaymentIntent[]
   webhookLogs    WebhookLog[]
+  backupSnapshots BackupSnapshot[]
   renegotiations Renegotiation[]
   installments   Installment[]
   installmentSplits InstallmentSplit[]
@@ -485,6 +486,7 @@ model Payment {
   note            String?
   receiptUrl      String?
   paidAt          DateTime    @default(now())
+  deletedAt       DateTime?
 
   clientId        Int
   client          Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -506,6 +508,7 @@ model Payment {
   @@index([accountId, type])
   @@index([clientId, paidAt])
   @@index([debtId, paidAt])
+  @@index([accountId, deletedAt])
 }
 
 model PaymentIntent {
@@ -569,4 +572,31 @@ model WebhookLog {
 
   @@index([provider, resourceId])
   @@index([processed, createdAt])
+}
+
+model BackupSnapshot {
+  id              Int      @id @default(autoincrement())
+  kind            String   @default("MANUAL")
+  status          String   @default("COMPLETED")
+  scope           String   @default("GLOBAL")
+  fileName        String
+  payload         Json
+  counts          Json     @default("{}")
+  metadata        Json     @default("{}")
+  sizeBytes       Int      @default(0)
+  errorMessage    String?
+
+  accountId       Int?
+  account         Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  createdByUserId Int?
+  createdByEmail  String?
+  restoredAt      DateTime?
+  restoredByEmail String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@index([scope, kind, createdAt])
+  @@index([accountId, createdAt])
 }

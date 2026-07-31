@@ -20,7 +20,10 @@ const {
 const {
   getOperationsHealth,
   exportOperationsBackup,
+  listOperationsBackups,
+  downloadOperationsBackupSnapshot,
   restoreOperationsBackup,
+  restoreOperationsBackupSnapshot,
 } = require('../controllers/operations.controller');
 
 const router = express.Router();
@@ -36,8 +39,11 @@ router.get('/support', listSuperAdminSupport);
 router.get('/logs', listSuperAdminAuditLogs);
 router.get('/webhooks', listSuperAdminWebhooks);
 router.get('/operations/health', getOperationsHealth);
+router.get('/operations/backups', listOperationsBackups);
 router.get('/operations/backup', exportOperationsBackup);
+router.get('/operations/backups/:id/download', downloadOperationsBackupSnapshot);
 router.post('/operations/restore', restoreOperationsBackup);
+router.post('/operations/backups/:id/restore', restoreOperationsBackupSnapshot);
 router.patch('/accounts/:accountId/status', updateAccountStatus);
 router.post('/accounts/:accountId/plan', changeSuperAdminAccountPlan);
 router.delete('/accounts/:accountId/plan-schedule', cancelSuperAdminScheduledPlanChange);

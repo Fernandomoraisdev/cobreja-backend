@@ -66,6 +66,7 @@ async function getFinancialAnalytics(req, res) {
       prisma.payment.findMany({
         where: {
           accountId,
+          deletedAt: null,
           paidAt: { gte: chartStart, lte: currentMonthEnd },
         },
         include: {

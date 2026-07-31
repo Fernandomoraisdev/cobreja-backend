@@ -7,10 +7,10 @@ const bcrypt = require('bcrypt');
 
 const baseClientInclude = {
   debts: {
-    where: { deletedAt: null },
     orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
   },
   payments: {
+    where: { deletedAt: null },
     orderBy: { paidAt: 'desc' },
   },
   renegotiations: {
@@ -76,6 +76,7 @@ function serializePayment(payment) {
     paidAt: payment.paidAt,
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
+    deletedAt: payment.deletedAt,
   };
 }
 
@@ -801,7 +802,7 @@ async function getClientsSummary(req, res) {
         },
       }),
       prisma.payment.findMany({
-        where: { accountId: req.user.accountId },
+        where: { accountId: req.user.accountId, deletedAt: null },
       }),
     ]);
 

@@ -16,16 +16,39 @@ Todos os endpoints abaixo exigem JWT de Super Admin.
 
 - `GET /api/super-admin/operations/backup`
   - Gera backup logico JSON global.
-  - Remove senhas de usuarios.
+  - Mantem hashes de senha para permitir restauracao completa de login.
   - Mascara credenciais do Mercado Pago.
   - Registra auditoria da exportacao.
+  - Salva o snapshot no historico de backups.
 
 - `GET /api/super-admin/operations/backup?accountId=ID`
   - Gera backup logico JSON apenas de uma empresa.
 
+- `GET /api/super-admin/operations/backups`
+  - Lista o historico de snapshots salvos.
+
+- `GET /api/super-admin/operations/backups/:id/download`
+  - Baixa um snapshot salvo no historico.
+
+- `POST /api/super-admin/operations/backups/:id/restore`
+  - Restaura um snapshot salvo.
+  - Antes da restauracao, cria automaticamente um snapshot `PRE_RESTORE`.
+
+- `POST /api/super-admin/operations/restore`
+  - Restaura um backup JSON enviado pelo Super Admin.
+  - Antes da restauracao, cria automaticamente um snapshot `PRE_RESTORE`.
+
+## Backups automaticos
+
+- Ao iniciar em producao, o backend roda `scripts/deploy-start.js`.
+- O script aplica migrations, cria um snapshot `PRE_DEPLOY` e depois inicia o servidor.
+- Com `AUTO_BACKUP_ENABLED` diferente de `false`, o servidor cria um snapshot `AUTOMATIC_DAILY` por dia.
+- O historico automatico mantem os ultimos 30 snapshots diarios.
+- Os snapshots ficam no proprio PostgreSQL. Isso protege contra erros de operacao e exclusoes logicas, mas nao substitui backup externo do provedor do banco.
+
 ## Checklist antes de cada deploy
 
-1. Gerar backup pelo endpoint de operacoes ou confirmar backup nativo do PostgreSQL no Railway.
+1. Confirmar que o snapshot `PRE_DEPLOY` foi criado no historico de backups.
 2. Validar que a migracao Prisma nao apaga coluna, tabela ou dados em producao.
 3. Rodar validacoes locais do backend.
 4. Rodar builds do Flutter quando houver alteracao no frontend: web, Android e Windows.
@@ -40,6 +63,7 @@ Todos os endpoints abaixo exigem JWT de Super Admin.
 - Nunca renomear/remover coluna com dados sem backup e roteiro de rollback.
 - Evitar migracao manual diretamente no banco de producao.
 - Toda mudanca de pagamento, assinatura, conta, cliente ou divida precisa de auditoria ou log rastreavel.
+- Exclusoes de clientes, dividas e pagamentos devem ser logicas por padrao. Exclusao definitiva so deve existir em fluxo separado e confirmado.
 
 ## Rollback
 

@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon index.js",
-    "start": "npx prisma migrate deploy && node index.js",
+    "start": "node scripts/deploy-start.js",
+    "backup:deploy": "node scripts/create-backup.js PRE_DEPLOY",
+    "backup:daily": "node scripts/create-backup.js AUTOMATIC_DAILY",
     "postinstall": "prisma generate"
   },
   "keywords": [],

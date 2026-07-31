@@ -200,9 +200,11 @@ async function updateDebt(req, res) {
       where: {
         id: debtId,
         accountId: req.user.accountId,
+        deletedAt: null,
       },
       include: {
         payments: {
+          where: { deletedAt: null },
           orderBy: { paidAt: 'asc' },
         },
       },
@@ -336,10 +338,73 @@ async function deleteDebt(req, res) {
   }
 }
 
+async function restoreDebt(req, res) {
+  try {
+    const debtId = Number(req.params.id);
+
+    if (!debtId) {
+      return res.status(400).json({ message: 'ID da divida invalido', data: {} });
+    }
+
+    const debt = await prisma.debt.findFirst({
+      where: {
+        id: debtId,
+        accountId: req.user.accountId,
+      },
+      include: {
+        payments: {
+          where: { deletedAt: null },
+          orderBy: { paidAt: 'asc' },
+        },
+        installments: {
+          orderBy: { installmentNumber: 'asc' },
+        },
+      },
+    });
+
+    if (!debt) {
+      return res.status(404).json({ message: 'Divida nao encontrada', data: {} });
+    }
+
+    const simulation = simulatePaymentsForDebt(
+      {
+        ...debt,
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+      debt.payments || [],
+    );
+
+    const restoredDebt = await prisma.debt.update({
+      where: { id: debtId },
+      data: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        settledAt: null,
+        ...buildDebtUpdateFromState(simulation.state),
+      },
+      include: {
+        installments: {
+          orderBy: { installmentNumber: 'asc' },
+        },
+      },
+    });
+
+    return res.json({
+      message: 'Divida restaurada com sucesso',
+      data: enrichDebt(restoredDebt),
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao restaurar divida', data: {} });
+  }
+}
+
 module.exports = {
   getMyDebts,
   createDebt,
   getDebtsByClient,
   updateDebt,
   deleteDebt,
+  restoreDebt,
 };

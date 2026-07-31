@@ -1,106 +1,19 @@
 const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
+const {
+  buildBackupPayload,
+  createBackupSnapshot,
+  getBackupSnapshot,
+  listBackupSnapshots,
+  restoreBackupPayload,
+  saveBackupSnapshot,
+  serializeSnapshot,
+} = require('../services/backup.service');
 
 function numberParam(value) {
   if (value == null || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function backupFileName(accountId) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const scope = accountId ? `account-${accountId}` : 'global';
-  return `peguei-paguei-backup-${scope}-${stamp}.json`;
-}
-
-function sanitizeUser(user) {
-  if (!user) return user;
-  const { password, ...safeUser } = user;
-  return safeUser;
-}
-
-function maskSecret(value) {
-  if (!value) return null;
-  const text = String(value);
-  if (text.length <= 8) return '********';
-  return `${text.slice(0, 4)}...${text.slice(-4)}`;
-}
-
-function sanitizeMercadoPagoConfig(config) {
-  if (!config || typeof config !== 'object' || Array.isArray(config)) return config || {};
-  return {
-    ...config,
-    accessToken: maskSecret(config.accessToken),
-    publicKey: maskSecret(config.publicKey),
-    webhookSecret: maskSecret(config.webhookSecret),
-    hasAccessToken: Boolean(config.accessToken),
-    hasPublicKey: Boolean(config.publicKey),
-    hasWebhookSecret: Boolean(config.webhookSecret),
-  };
-}
-
-function redactSensitiveJson(value) {
-  if (Array.isArray(value)) return value.map(redactSensitiveJson);
-  if (!value || typeof value !== 'object') return value;
-
-  return Object.entries(value).reduce((safe, [key, item]) => {
-    const normalizedKey = key.toLowerCase();
-    const shouldRedact = [
-      'password',
-      'senha',
-      'token',
-      'secret',
-      'apikey',
-      'api_key',
-      'privatekey',
-      'private_key',
-    ].some((sensitive) => normalizedKey.includes(sensitive));
-
-    safe[key] = shouldRedact ? maskSecret(item) : redactSensitiveJson(item);
-    return safe;
-  }, {});
-}
-
-function sanitizeAccountSettings(settings) {
-  if (!settings) return settings;
-  return {
-    ...settings,
-    company: redactSensitiveJson(settings.company),
-    admin: redactSensitiveJson(settings.admin),
-    finance: redactSensitiveJson(settings.finance),
-    mercadoPago: sanitizeMercadoPagoConfig(settings.mercadoPago),
-    whatsapp: redactSensitiveJson(settings.whatsapp),
-    saas: redactSensitiveJson(settings.saas),
-    appearance: redactSensitiveJson(settings.appearance),
-    notifications: redactSensitiveJson(settings.notifications),
-    security: redactSensitiveJson(settings.security),
-    automation: redactSensitiveJson(settings.automation),
-  };
-}
-
-function buildScopedWhere(accountId) {
-  return accountId ? { accountId } : {};
-}
-
-function tableRows(payload, name) {
-  const rows = payload?.tables?.[name];
-  return Array.isArray(rows) ? rows : [];
-}
-
-async function createManyIfAny(tx, modelName, rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return 0;
-  const result = await tx[modelName].createMany({ data: rows });
-  return result.count || 0;
-}
-
-async function resetSequence(tx, tableName, columnName = 'id') {
-  await tx.$executeRawUnsafe(`
-    SELECT setval(
-      pg_get_serial_sequence('"${tableName}"', '${columnName}'),
-      COALESCE((SELECT MAX("${columnName}") FROM "${tableName}"), 1),
-      (SELECT COUNT(*) > 0 FROM "${tableName}")
-    )
-  `);
 }
 
 async function countOrNull(modelName, where = {}) {
@@ -117,7 +30,7 @@ async function getOperationsHealth(req, res) {
   try {
     await prisma.$queryRaw`SELECT 1`;
 
-    const scopedWhere = buildScopedWhere(accountId);
+    const scopedWhere = accountId ? { accountId } : {};
     const [
       accounts,
       users,
@@ -128,6 +41,7 @@ async function getOperationsHealth(req, res) {
       subscriptions,
       supportConversations,
       webhookLogs,
+      backupSnapshots,
     ] = await Promise.all([
       countOrNull('account', accountId ? { id: accountId } : {}),
       countOrNull('user', scopedWhere),
@@ -138,6 +52,7 @@ async function getOperationsHealth(req, res) {
       countOrNull('subscription', scopedWhere),
       countOrNull('supportConversation', scopedWhere),
       countOrNull('webhookLog', accountId ? { accountId } : {}),
+      countOrNull('backupSnapshot', accountId ? { accountId } : {}),
     ]);
 
     return res.json({
@@ -157,6 +72,7 @@ async function getOperationsHealth(req, res) {
         hasBackendPublicUrl: Boolean(process.env.BACKEND_PUBLIC_URL),
         hasMercadoPagoAccessToken: Boolean(process.env.MERCADO_PAGO_ACCESS_TOKEN),
         hasMercadoPagoWebhookSecret: Boolean(process.env.MERCADO_PAGO_WEBHOOK_SECRET),
+        autoBackupEnabled: process.env.AUTO_BACKUP_ENABLED !== 'false',
       },
       counts: {
         accounts,
@@ -168,6 +84,7 @@ async function getOperationsHealth(req, res) {
         subscriptions,
         supportConversations,
         webhookLogs,
+        backupSnapshots,
       },
     });
   } catch (err) {
@@ -182,119 +99,31 @@ async function getOperationsHealth(req, res) {
 
 async function exportOperationsBackup(req, res) {
   const accountId = numberParam(req.query.accountId);
-  const scopedWhere = buildScopedWhere(accountId);
-  const accountWhere = accountId ? { id: accountId } : {};
-  const nullableAccountWhere = accountId ? { accountId } : {};
 
   try {
-    const [
-      accounts,
-      accountSettings,
-      plans,
-      subscriptions,
-      saasPaymentIntents,
-      users,
-      clients,
-      debts,
-      renegotiations,
-      installments,
-      installmentSplits,
-      creditRequests,
-      payments,
-      paymentIntents,
-      webhookLogs,
-      supportConversations,
-      supportMessages,
-      auditLogs,
-    ] = await Promise.all([
-      prisma.account.findMany({ where: accountWhere, orderBy: { id: 'asc' } }),
-      prisma.accountSettings.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.plan.findMany({ orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }),
-      prisma.subscription.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.saasPaymentIntent.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.user.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.client.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.debt.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.renegotiation.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.installment.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.installmentSplit.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.creditRequest.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.payment.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.paymentIntent.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.webhookLog.findMany({ where: nullableAccountWhere, orderBy: { id: 'asc' } }),
-      prisma.supportConversation.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.supportMessage.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-      prisma.auditLog.findMany({ where: scopedWhere, orderBy: { id: 'asc' } }),
-    ]);
-
-    const payload = {
-      metadata: {
-        product: 'Peguei & Paguei',
-        type: 'logical-backup',
-        generatedAt: new Date().toISOString(),
-        generatedByUserId: req.user?.id || null,
-        generatedByEmail: req.user?.email || null,
-        scope: accountId ? 'ACCOUNT' : 'GLOBAL',
-        accountId,
-        containsPasswords: true,
-        containsRawMercadoPagoSecrets: false,
-      },
-      counts: {
-        accounts: accounts.length,
-        accountSettings: accountSettings.length,
-        plans: plans.length,
-        subscriptions: subscriptions.length,
-        saasPaymentIntents: saasPaymentIntents.length,
-        users: users.length,
-        clients: clients.length,
-        debts: debts.length,
-        renegotiations: renegotiations.length,
-        installments: installments.length,
-        installmentSplits: installmentSplits.length,
-        creditRequests: creditRequests.length,
-        payments: payments.length,
-        paymentIntents: paymentIntents.length,
-        webhookLogs: webhookLogs.length,
-        supportConversations: supportConversations.length,
-        supportMessages: supportMessages.length,
-        auditLogs: auditLogs.length,
-      },
-      tables: {
-        accounts,
-        accountSettings: accountSettings.map(sanitizeAccountSettings),
-        plans,
-        subscriptions,
-        saasPaymentIntents,
-        users,
-        clients,
-        debts,
-        renegotiations,
-        installments,
-        installmentSplits,
-        creditRequests,
-        payments,
-        paymentIntents,
-        webhookLogs,
-        supportConversations,
-        supportMessages,
-        auditLogs,
-      },
-    };
+    const snapshot = await createBackupSnapshot({
+      accountId,
+      kind: 'MANUAL',
+      user: req.user,
+    });
+    const payload = snapshot.payload;
 
     await writeAuditLog({
       req,
       action: 'OPERATIONS_BACKUP_EXPORTED',
-      entity: 'OperationsBackup',
+      entity: 'BackupSnapshot',
+      entityId: snapshot.id,
       severity: 'WARNING',
       metadata: {
         scope: payload.metadata.scope,
         accountId,
         counts: payload.counts,
+        fileName: snapshot.fileName,
       },
     });
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${backupFileName(accountId)}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${snapshot.fileName}"`);
     return res.json(payload);
   } catch (err) {
     console.error('Erro ao gerar backup operacional:', err);
@@ -304,155 +133,62 @@ async function exportOperationsBackup(req, res) {
   }
 }
 
+async function listOperationsBackups(req, res) {
+  const accountId = numberParam(req.query.accountId);
+  const limit = numberParam(req.query.limit) || 50;
+
+  try {
+    const backups = await listBackupSnapshots({ accountId, limit });
+    return res.json({ data: backups });
+  } catch (err) {
+    console.error('Erro ao listar historico de backups:', err);
+    return res.status(500).json({ error: 'Nao foi possivel listar os backups.' });
+  }
+}
+
+async function downloadOperationsBackupSnapshot(req, res) {
+  try {
+    const snapshot = await getBackupSnapshot(req.params.id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'Backup nao encontrado.' });
+    }
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${snapshot.fileName}"`);
+    return res.json(snapshot.payload);
+  } catch (err) {
+    console.error('Erro ao baixar backup:', err);
+    return res.status(500).json({ error: 'Nao foi possivel baixar o backup.' });
+  }
+}
+
 async function restoreOperationsBackup(req, res) {
   const payload = req.body?.backup && typeof req.body.backup === 'object'
     ? req.body.backup
     : req.body;
 
-  if (!payload || typeof payload !== 'object' || !payload.tables) {
-    return res.status(400).json({
-      error: 'Backup invalido. Envie o JSON gerado pelo backup operacional.',
-    });
-  }
-
-  if (payload.metadata?.type !== 'logical-backup') {
-    return res.status(400).json({
-      error: 'Backup invalido ou incompatível.',
-    });
-  }
-
-  if (payload.metadata?.scope && payload.metadata.scope !== 'GLOBAL') {
-    return res.status(400).json({
-      error: 'Restauracao automatica aceita apenas backup global.',
-    });
-  }
-
-  const users = tableRows(payload, 'users');
-  if (users.some((user) => !user.password)) {
-    return res.status(400).json({
-      error: 'Este backup nao contem senhas. Gere um backup novo antes de restaurar.',
-    });
-  }
-
   try {
-    const restored = await prisma.$transaction(async (tx) => {
-      await tx.paymentIntent.deleteMany({});
-      await tx.payment.deleteMany({});
-      await tx.installmentSplit.deleteMany({});
-      await tx.installment.deleteMany({});
-      await tx.debt.deleteMany({});
-      await tx.renegotiation.deleteMany({});
-      await tx.creditRequest.deleteMany({});
-      await tx.supportMessage.deleteMany({});
-      await tx.supportConversation.deleteMany({});
-      await tx.auditLog.deleteMany({});
-      await tx.webhookLog.deleteMany({});
-      await tx.saasPaymentIntent.deleteMany({});
-      await tx.subscription.deleteMany({});
-      await tx.accountSettings.deleteMany({});
-      await tx.client.deleteMany({});
-      await tx.user.deleteMany({});
-      await tx.account.deleteMany({});
-      await tx.plan.deleteMany({});
+    const safetyPayload = await buildBackupPayload({
+      kind: 'PRE_RESTORE',
+      generatedByUserId: req.user?.id || null,
+      generatedByEmail: req.user?.email || null,
+    });
+    const safetySnapshot = await saveBackupSnapshot({
+      payload: safetyPayload,
+      kind: 'PRE_RESTORE',
+      user: req.user,
+    });
 
-      const counts = {};
-      counts.plans = await createManyIfAny(tx, 'plan', tableRows(payload, 'plans'));
-      counts.accounts = await createManyIfAny(tx, 'account', tableRows(payload, 'accounts'));
-      counts.users = await createManyIfAny(tx, 'user', users);
-      counts.accountSettings = await createManyIfAny(
-        tx,
-        'accountSettings',
-        tableRows(payload, 'accountSettings'),
-      );
-      counts.clients = await createManyIfAny(tx, 'client', tableRows(payload, 'clients'));
-      counts.subscriptions = await createManyIfAny(
-        tx,
-        'subscription',
-        tableRows(payload, 'subscriptions'),
-      );
-      counts.renegotiations = await createManyIfAny(
-        tx,
-        'renegotiation',
-        tableRows(payload, 'renegotiations'),
-      );
-      counts.debts = await createManyIfAny(tx, 'debt', tableRows(payload, 'debts'));
-      counts.installments = await createManyIfAny(
-        tx,
-        'installment',
-        tableRows(payload, 'installments'),
-      );
-      counts.installmentSplits = await createManyIfAny(
-        tx,
-        'installmentSplit',
-        tableRows(payload, 'installmentSplits'),
-      );
-      counts.payments = await createManyIfAny(tx, 'payment', tableRows(payload, 'payments'));
-      counts.paymentIntents = await createManyIfAny(
-        tx,
-        'paymentIntent',
-        tableRows(payload, 'paymentIntents'),
-      );
-      counts.saasPaymentIntents = await createManyIfAny(
-        tx,
-        'saasPaymentIntent',
-        tableRows(payload, 'saasPaymentIntents'),
-      );
-      counts.creditRequests = await createManyIfAny(
-        tx,
-        'creditRequest',
-        tableRows(payload, 'creditRequests'),
-      );
-      counts.webhookLogs = await createManyIfAny(
-        tx,
-        'webhookLog',
-        tableRows(payload, 'webhookLogs'),
-      );
-      counts.supportConversations = await createManyIfAny(
-        tx,
-        'supportConversation',
-        tableRows(payload, 'supportConversations'),
-      );
-      counts.supportMessages = await createManyIfAny(
-        tx,
-        'supportMessage',
-        tableRows(payload, 'supportMessages'),
-      );
-      counts.auditLogs = await createManyIfAny(tx, 'auditLog', tableRows(payload, 'auditLogs'));
-
-      const tableNames = [
-        'Plan',
-        'Account',
-        'User',
-        'AccountSettings',
-        'Subscription',
-        'SaasPaymentIntent',
-        'AuditLog',
-        'SupportConversation',
-        'SupportMessage',
-        'Client',
-        'Debt',
-        'Renegotiation',
-        'Installment',
-        'InstallmentSplit',
-        'CreditRequest',
-        'Payment',
-        'PaymentIntent',
-        'WebhookLog',
-      ];
-      for (const tableName of tableNames) {
-        await resetSequence(tx, tableName);
-      }
-
-      return counts;
-    }, { timeout: 60000 });
+    const restored = await restoreBackupPayload(payload);
 
     await writeAuditLog({
       req,
       action: 'OPERATIONS_BACKUP_RESTORED',
-      entity: 'OperationsBackup',
+      entity: 'BackupSnapshot',
       severity: 'WARNING',
       metadata: {
-        generatedAt: payload.metadata?.generatedAt || null,
+        generatedAt: payload?.metadata?.generatedAt || null,
+        safetySnapshotId: safetySnapshot.id,
         restored,
       },
     });
@@ -460,12 +196,69 @@ async function restoreOperationsBackup(req, res) {
     return res.json({
       ok: true,
       message: 'Backup restaurado com sucesso.',
+      safetySnapshot: serializeSnapshot(safetySnapshot),
       counts: restored,
     });
   } catch (err) {
     console.error('Erro ao restaurar backup operacional:', err);
-    return res.status(500).json({
-      error: 'Nao foi possivel restaurar o backup operacional.',
+    return res.status(err.statusCode || 500).json({
+      error: err.message || 'Nao foi possivel restaurar o backup operacional.',
+    });
+  }
+}
+
+async function restoreOperationsBackupSnapshot(req, res) {
+  try {
+    const snapshot = await getBackupSnapshot(req.params.id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'Backup nao encontrado.' });
+    }
+
+    const safetyPayload = await buildBackupPayload({
+      kind: 'PRE_RESTORE',
+      generatedByUserId: req.user?.id || null,
+      generatedByEmail: req.user?.email || null,
+    });
+    const safetySnapshot = await saveBackupSnapshot({
+      payload: safetyPayload,
+      kind: 'PRE_RESTORE',
+      user: req.user,
+    });
+
+    const restored = await restoreBackupPayload(snapshot.payload);
+
+    await prisma.backupSnapshot.update({
+      where: { id: snapshot.id },
+      data: {
+        restoredAt: new Date(),
+        restoredByEmail: req.user?.email || null,
+      },
+    });
+
+    await writeAuditLog({
+      req,
+      action: 'OPERATIONS_SNAPSHOT_RESTORED',
+      entity: 'BackupSnapshot',
+      entityId: snapshot.id,
+      severity: 'WARNING',
+      metadata: {
+        fileName: snapshot.fileName,
+        safetySnapshotId: safetySnapshot.id,
+        restored,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      message: 'Backup restaurado com sucesso.',
+      restoredSnapshotId: snapshot.id,
+      safetySnapshot: serializeSnapshot(safetySnapshot),
+      counts: restored,
+    });
+  } catch (err) {
+    console.error('Erro ao restaurar snapshot:', err);
+    return res.status(err.statusCode || 500).json({
+      error: err.message || 'Nao foi possivel restaurar o backup.',
     });
   }
 }
@@ -473,5 +266,8 @@ async function restoreOperationsBackup(req, res) {
 module.exports = {
   getOperationsHealth,
   exportOperationsBackup,
+  listOperationsBackups,
+  downloadOperationsBackupSnapshot,
   restoreOperationsBackup,
+  restoreOperationsBackupSnapshot,
 };

@@ -88,6 +88,7 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
     where: { renegotiationId },
     include: {
       payments: {
+        where: { deletedAt: null },
         orderBy: { paidAt: 'asc' },
       },
       splits: {
@@ -201,6 +202,7 @@ async function recalculateDebtAndRelations(tx, debtId) {
     where: { id: debtId },
     include: {
       payments: {
+        where: { deletedAt: null },
         orderBy: { paidAt: 'asc' },
       },
     },
@@ -342,6 +344,7 @@ async function createPayment(req, res) {
           where: {
             installmentId: target.installment.id,
             accountId: req.user.accountId,
+            deletedAt: null,
           },
         });
         const alreadyPaidPrincipal = roundMoney(
@@ -467,6 +470,7 @@ async function updatePayment(req, res) {
       where: {
         id: paymentId,
         accountId: req.user.accountId,
+        deletedAt: null,
       },
       include: {
         client: true,
@@ -587,6 +591,7 @@ async function deletePayment(req, res) {
       where: {
         id: paymentId,
         accountId: req.user.accountId,
+        deletedAt: null,
       },
       include: {
         debt: true,
@@ -609,8 +614,9 @@ async function deletePayment(req, res) {
       : null;
 
     await prisma.$transaction(async (tx) => {
-      await tx.payment.delete({
+      await tx.payment.update({
         where: { id: paymentId },
+        data: { deletedAt: new Date() },
       });
 
       if (existingPayment.debtId) {
@@ -624,6 +630,7 @@ async function deletePayment(req, res) {
             where: { id: existingPayment.debtId },
             include: {
               payments: {
+                where: { deletedAt: null },
                 orderBy: { paidAt: 'asc' },
               },
             },
@@ -705,6 +712,7 @@ async function getMyPayments(req, res) {
       where: {
         clientId: client.id,
         accountId: req.user.accountId,
+        deletedAt: null,
         ...(type ? { type } : {}),
       },
       include: {
@@ -732,6 +740,7 @@ async function getPaymentHistory(req, res) {
     const payments = await prisma.payment.findMany({
       where: {
         accountId: req.user.accountId,
+        deletedAt: null,
         ...(type ? { type } : {}),
       },
       include: {
@@ -777,6 +786,7 @@ async function getPaymentHistoryByClient(req, res) {
       where: {
         clientId,
         accountId: req.user.accountId,
+        deletedAt: null,
         ...(type ? { type } : {}),
       },
       include: {

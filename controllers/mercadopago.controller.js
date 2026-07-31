@@ -146,6 +146,7 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
     where: { renegotiationId },
     include: {
       payments: {
+        where: { deletedAt: null },
         orderBy: { paidAt: 'asc' },
       },
       splits: {
@@ -233,6 +234,7 @@ async function recalculateDebtAndRelations(tx, debtId) {
     where: { id: debtId },
     include: {
       payments: {
+        where: { deletedAt: null },
         orderBy: { paidAt: 'asc' },
       },
     },

@@ -246,6 +246,7 @@ async function getSuperAdminOverview(req, res) {
     safe(
       'paymentStats',
       prisma.payment.aggregate({
+        where: { deletedAt: null },
         _sum: { amount: true },
         _count: { id: true },
       }),
@@ -254,7 +255,7 @@ async function getSuperAdminOverview(req, res) {
     safe(
       'paymentTodayStats',
       prisma.payment.aggregate({
-        where: { paidAt: { gte: today } },
+        where: { paidAt: { gte: today }, deletedAt: null },
         _sum: { amount: true },
         _count: { id: true },
       }),
@@ -554,6 +555,7 @@ async function cancelSuperAdminScheduledPlanChange(req, res) {
 
 async function listSuperAdminPayments(req, res) {
   const payments = await prisma.payment.findMany({
+    where: { deletedAt: null },
     include: {
       account: true,
       client: true,
