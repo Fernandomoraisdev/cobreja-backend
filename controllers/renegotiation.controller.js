@@ -186,6 +186,13 @@ async function createRenegotiation(req, res) {
       });
     }
 
+    if (!debtIds.length) {
+      return res.status(400).json({
+        message: 'Selecione ao menos uma divida para renegociar',
+        data: {},
+      });
+    }
+
     const client = await prisma.client.findFirst({
       where: {
         id: clientId,
@@ -203,7 +210,7 @@ async function createRenegotiation(req, res) {
         accountId: req.user.accountId,
         status: 'ACTIVE',
         deletedAt: null,
-        ...(debtIds.length ? { id: { in: debtIds } } : {}),
+        id: { in: debtIds },
       },
       orderBy: { dueDate: 'asc' },
     });

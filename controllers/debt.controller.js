@@ -318,14 +318,16 @@ async function deleteDebt(req, res) {
       return res.status(404).json({ message: 'Divida nao encontrada', data: {} });
     }
 
-    await prisma.$transaction([
-      prisma.payment.deleteMany({ where: { debtId } }),
-      prisma.installment.deleteMany({ where: { debtId } }),
-      prisma.debt.delete({ where: { id: debtId } }),
-    ]);
+    await prisma.debt.update({
+      where: { id: debtId },
+      data: {
+        status: 'EXCLUDED',
+        deletedAt: new Date(),
+      },
+    });
 
     return res.json({
-      message: 'Divida removida com sucesso',
+      message: 'Divida movida para excluidos com sucesso',
       data: {},
     });
   } catch (err) {
