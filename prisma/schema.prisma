@@ -29,6 +29,13 @@ enum DebtKind {
   RENEGOTIATED
 }
 
+enum DebtType {
+  LOAN
+  INSTALLMENT_SALE
+  SERVICE
+  MANUAL_AGREEMENT
+}
+
 enum InterestMode {
   PERCENTAGE
   FIXED
@@ -323,6 +330,7 @@ model Debt {
   id                    Int          @id @default(autoincrement())
   title                 String?
   kind                  DebtKind     @default(STANDARD)
+  debtType              DebtType     @default(LOAN)
   status                DebtStatus   @default(ACTIVE)
   principalAmount       Float      @default(0)
   principalOutstanding  Float      @default(0)

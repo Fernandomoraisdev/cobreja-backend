@@ -124,6 +124,7 @@ function toReplayState(debt) {
   return {
     id: debt.id,
     kind: debt.kind,
+    debtType: debt.debtType || 'LOAN',
     title: debt.title || null,
     status: debt.deletedAt ? 'EXCLUDED' : 'ACTIVE',
     principalAmount: roundMoney(Number(debt.principalAmount || 0)),

@@ -339,6 +339,7 @@ async function createRenegotiation(req, res) {
         data: {
           title: 'Renegociacao',
           kind: 'RENEGOTIATED',
+          debtType: 'MANUAL_AGREEMENT',
           status: 'ACTIVE',
           principalAmount: negotiatedTotal,
           principalOutstanding: negotiatedTotal,

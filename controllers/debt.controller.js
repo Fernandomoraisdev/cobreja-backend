@@ -30,6 +30,25 @@ function toNullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeDebtType(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  if (['LOAN', 'INSTALLMENT_SALE', 'SERVICE', 'MANUAL_AGREEMENT'].includes(normalized)) {
+    return normalized;
+  }
+  return 'LOAN';
+}
+
+function normalizeDebtTypeInterest({ debtType, monthlyInterestMode, monthlyInterestValue }) {
+  if (debtType === 'LOAN') {
+    return { monthlyInterestMode, monthlyInterestValue };
+  }
+
+  return {
+    monthlyInterestMode: null,
+    monthlyInterestValue: null,
+  };
+}
+
 function startOfDay(value) {
   const date = new Date(value);
   date.setHours(0, 0, 0, 0);
@@ -100,6 +119,12 @@ async function createDebt(req, res) {
     const monthlyInterestValue = monthlyInterestMode === 'PERCENTAGE'
       ? toNullableNumber(req.body.interestPercent ?? req.body.monthlyInterestValue)
       : toNullableNumber(req.body.interestValue ?? req.body.monthlyInterestValue);
+    const debtType = normalizeDebtType(req.body.debtType);
+    const monthlyInterest = normalizeDebtTypeInterest({
+      debtType,
+      monthlyInterestMode,
+      monthlyInterestValue,
+    });
 
     const dailyInterestMode = normalizeInterestMode(
       req.body.dailyInterestMode,
@@ -125,11 +150,12 @@ async function createDebt(req, res) {
       data: {
         title: req.body.title ? String(req.body.title).trim() : null,
         kind: 'STANDARD',
+        debtType,
         status: 'ACTIVE',
         principalAmount,
         principalOutstanding: principalAmount,
-        monthlyInterestMode,
-        monthlyInterestValue,
+        monthlyInterestMode: monthlyInterest.monthlyInterestMode,
+        monthlyInterestValue: monthlyInterest.monthlyInterestValue,
         dailyInterestMode,
         dailyInterestValue,
         borrowedAt,
@@ -232,6 +258,9 @@ async function updateDebt(req, res) {
     const draftDebt = {
       ...debt,
       title: req.body.title !== undefined ? String(req.body.title || '').trim() || null : debt.title,
+      debtType: req.body.debtType !== undefined
+        ? normalizeDebtType(req.body.debtType)
+        : debt.debtType || 'LOAN',
       principalAmount:
         req.body.principalAmount !== undefined || req.body.amount !== undefined || req.body.total !== undefined
           ? Number(req.body.principalAmount ?? req.body.amount ?? req.body.total)
@@ -273,6 +302,13 @@ async function updateDebt(req, res) {
           ? (req.body.deletedAt ? new Date(req.body.deletedAt) : null)
           : debt.deletedAt,
     };
+    const normalizedDraftMonthlyInterest = normalizeDebtTypeInterest({
+      debtType: draftDebt.debtType,
+      monthlyInterestMode: draftDebt.monthlyInterestMode,
+      monthlyInterestValue: draftDebt.monthlyInterestValue,
+    });
+    draftDebt.monthlyInterestMode = normalizedDraftMonthlyInterest.monthlyInterestMode;
+    draftDebt.monthlyInterestValue = normalizedDraftMonthlyInterest.monthlyInterestValue;
 
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
 
@@ -280,6 +316,7 @@ async function updateDebt(req, res) {
       where: { id: debtId },
       data: {
         title: draftDebt.title,
+        debtType: draftDebt.debtType,
         principalAmount: draftDebt.principalAmount,
         monthlyInterestMode: draftDebt.monthlyInterestMode,
         monthlyInterestValue: draftDebt.monthlyInterestValue,

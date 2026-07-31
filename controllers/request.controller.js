@@ -194,6 +194,7 @@ async function approveRequest(req, res) {
           data: {
             title: 'Credito aprovado parcelado',
             kind: 'RENEGOTIATED',
+            debtType: 'MANUAL_AGREEMENT',
             status: 'ACTIVE',
             principalAmount,
             principalOutstanding: principalAmount,
@@ -229,6 +230,7 @@ async function approveRequest(req, res) {
           data: {
             title: 'Credito aprovado',
             kind: 'STANDARD',
+            debtType: 'LOAN',
             status: 'ACTIVE',
             principalAmount,
             principalOutstanding: principalAmount,
