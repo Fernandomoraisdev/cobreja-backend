@@ -23,7 +23,7 @@ const notificationRoutes = require('./routes/notification.routes');
 const superAdminRoutes = require('./routes/superAdmin.routes');
 const authMiddleware = require('./authMiddleware');
 const { signAuthToken } = require('./utils/auth');
-const { isSuperAdminUser } = require('./utils/superAdmin');
+const { getEffectiveRole, getUserPermissions, isSuperAdminUser } = require('./utils/superAdmin');
 const { getMyDebts } = require('./controllers/debt.controller');
 const { getMyPayments } = require('./controllers/payment.controller');
 const { enforceClientLimit } = require('./services/saas.service');
@@ -73,6 +73,7 @@ async function ensureAccountInviteCode(accountId) {
 
 function sanitizeUser(user) {
   if (!user) return null;
+  const permissions = getUserPermissions(user);
   return {
     id: user.id,
     name: user.name,
@@ -81,6 +82,8 @@ function sanitizeUser(user) {
     phone: user.phone,
     avatarUrl: user.avatarUrl,
     role: user.role,
+    effectiveRole: permissions.effectiveRole,
+    isSuperAdmin: permissions.isSuperAdmin,
     accountId: user.accountId,
   };
 }
@@ -146,6 +149,8 @@ app.get('/me', authMiddleware, async (req, res) => {
     data: {
       user: sanitizeUser(user),
       isSuperAdmin: isSuperAdminUser(user),
+      effectiveRole: getEffectiveRole(user),
+      permissions: getUserPermissions(user),
       account,
       client: client || null,
     },
@@ -251,10 +256,15 @@ app.post('/login', async (req, res) => {
       data: {
         token,
         user: sanitizeUser(user),
+        isSuperAdmin: isSuperAdminUser(user),
+        effectiveRole: getEffectiveRole(user),
+        permissions: getUserPermissions(user),
         account: user.account,
       },
       token,
       user: sanitizeUser(user),
+      isSuperAdmin: isSuperAdminUser(user),
+      effectiveRole: getEffectiveRole(user),
     });
   } catch (error) {
     console.error(error);
@@ -329,6 +339,9 @@ app.post('/register', async (req, res) => {
       message: 'Usuario criado com sucesso',
       data: {
         user: sanitizeUser(user),
+        isSuperAdmin: isSuperAdminUser(user),
+        effectiveRole: getEffectiveRole(user),
+        permissions: getUserPermissions(user),
         account: user.account,
       },
     });

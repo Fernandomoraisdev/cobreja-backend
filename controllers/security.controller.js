@@ -1,9 +1,11 @@
 const bcrypt = require('bcrypt');
 const prisma = require('../prisma');
 const { writeAuditLog } = require('../services/audit.service');
+const { getUserPermissions } = require('../utils/superAdmin');
 
 function sanitizeUser(user) {
   if (!user) return null;
+  const permissions = getUserPermissions(user);
   return {
     id: user.id,
     name: user.name,
@@ -11,6 +13,8 @@ function sanitizeUser(user) {
     cpf: user.cpf,
     phone: user.phone,
     role: user.role,
+    effectiveRole: permissions.effectiveRole,
+    isSuperAdmin: permissions.isSuperAdmin,
     accountId: user.accountId,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -102,6 +106,8 @@ async function getSecurityOverview(req, res) {
       }),
     ]);
 
+    const permissions = getUserPermissions(user);
+
     return res.json({
       message: 'Seguranca carregada com sucesso',
       data: {
@@ -109,9 +115,12 @@ async function getSecurityOverview(req, res) {
         jwt: getJwtStatus(),
         roles: {
           currentRole: req.user.role,
-          isAdmin: req.user.role === 'ADMIN',
-          isClient: req.user.role === 'CLIENT',
+          effectiveRole: permissions.effectiveRole,
+          isSuperAdmin: permissions.isSuperAdmin,
+          isAdmin: permissions.isAdmin,
+          isClient: permissions.isClient,
         },
+        permissions,
         accountIsolation: {
           accountId,
           enabled: Boolean(accountId),
