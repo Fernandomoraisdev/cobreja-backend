@@ -11,6 +11,20 @@ function normalizeInterestMode(value) {
   return [ 'PERCENTAGE', 'FIXED' ].includes(normalized) ? normalized : null;
 }
 
+function isValidDate(value) {
+  return value instanceof Date && !Number.isNaN(value.getTime());
+}
+
+function uniquePositiveIds(items) {
+  return Array.from(
+    new Set(
+      (Array.isArray(items) ? items : [])
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  );
+}
+
 function serializeInstallment(installment) {
   return {
     id: installment.id,
@@ -156,9 +170,7 @@ function buildInstallmentSplits({ installment, splitPayments }) {
 async function createRenegotiation(req, res) {
   try {
     const clientId = Number(req.body.clientId);
-    const debtIds = Array.isArray(req.body.debtIds)
-      ? req.body.debtIds.map((item) => Number(item)).filter(Boolean)
-      : [];
+    const debtIds = uniquePositiveIds(req.body.debtIds);
     const multiplier = req.body.multiplier !== undefined ? Number(req.body.multiplier) : null;
     const manualTotal = req.body.negotiatedTotal !== undefined
       ? Number(req.body.negotiatedTotal)
@@ -182,6 +194,41 @@ async function createRenegotiation(req, res) {
     if (!clientId || !installmentCount || !firstDueDate) {
       return res.status(400).json({
         message: 'clientId, installmentCount e firstDueDate sao obrigatorios',
+        data: {},
+      });
+    }
+
+    if (!Number.isInteger(installmentCount) || installmentCount < 1 || installmentCount > 240) {
+      return res.status(400).json({
+        message: 'Informe uma quantidade de parcelas entre 1 e 240',
+        data: {},
+      });
+    }
+
+    if (!isValidDate(firstDueDate) || !isValidDate(startedAt)) {
+      return res.status(400).json({
+        message: 'Informe datas validas para inicio e primeiro vencimento',
+        data: {},
+      });
+    }
+
+    if (firstDueDate < startedAt) {
+      return res.status(400).json({
+        message: 'O primeiro vencimento nao pode ser anterior ao inicio da renegociacao',
+        data: {},
+      });
+    }
+
+    if (dailyInterestValue !== null && (!Number.isFinite(dailyInterestValue) || dailyInterestValue < 0)) {
+      return res.status(400).json({
+        message: 'Informe um juros diario valido',
+        data: {},
+      });
+    }
+
+    if (dailyInterestValue > 0 && !dailyInterestMode) {
+      return res.status(400).json({
+        message: 'Informe se o juros diario sera em porcentagem ou valor fixo',
         data: {},
       });
     }
@@ -222,6 +269,16 @@ async function createRenegotiation(req, res) {
       });
     }
 
+    if (sourceDebts.length !== debtIds.length) {
+      return res.status(409).json({
+        message: 'Uma ou mais dividas selecionadas nao estao mais ativas. Atualize a tela e selecione novamente.',
+        data: {
+          requestedDebtIds: debtIds,
+          foundDebtIds: sourceDebts.map((debt) => debt.id),
+        },
+      });
+    }
+
     const originalTotal = roundMoney(
       sourceDebts.reduce(
         (sum, debt) => sum + calculateDebtSnapshot(debt).totalDue,
@@ -232,6 +289,13 @@ async function createRenegotiation(req, res) {
     const negotiatedTotal = manualTotal && manualTotal > 0
       ? roundMoney(manualTotal)
       : roundMoney(originalTotal * (multiplier || 1));
+
+    if (!Number.isFinite(negotiatedTotal) || negotiatedTotal <= 0) {
+      return res.status(400).json({
+        message: 'O total renegociado precisa ser maior que zero',
+        data: {},
+      });
+    }
 
     const installmentAmount = roundMoney(negotiatedTotal / installmentCount);
     const schedule = buildInstallmentSchedule(
@@ -456,6 +520,31 @@ async function cancelRenegotiation(req, res) {
     const sourceDebtIds = Array.isArray(existing.sourceDebtIds)
       ? existing.sourceDebtIds.map((item) => Number(item)).filter(Boolean)
       : [];
+
+    const renegotiatedDebtIds = existing.debts
+      .filter((debt) => debt.kind === 'RENEGOTIATED')
+      .map((debt) => debt.id);
+    const installmentIds = existing.installments.map((installment) => installment.id);
+
+    if (renegotiatedDebtIds.length || installmentIds.length) {
+      const paymentCount = await prisma.payment.count({
+        where: {
+          accountId: req.user.accountId,
+          deletedAt: null,
+          OR: [
+            ...(renegotiatedDebtIds.length ? [{ debtId: { in: renegotiatedDebtIds } }] : []),
+            ...(installmentIds.length ? [{ installmentId: { in: installmentIds } }] : []),
+          ],
+        },
+      });
+
+      if (paymentCount > 0) {
+        return res.status(409).json({
+          message: 'Este acordo ja possui pagamento registrado. Exclua/estorne os pagamentos antes de cancelar ou descongelar.',
+          data: { paymentCount },
+        });
+      }
+    }
 
     const cancelled = await prisma.$transaction(async (tx) => {
       await tx.renegotiation.update({
