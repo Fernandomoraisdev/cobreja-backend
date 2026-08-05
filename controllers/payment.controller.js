@@ -1,6 +1,7 @@
 const prisma = require('../prisma');
 const {
   MONEY_EPSILON,
+  calculateDebtSnapshot,
   simulatePaymentsForDebt,
   buildDebtUpdateFromState,
   addMonthsKeepingDay,
@@ -92,6 +93,15 @@ function serializePayment(payment) {
           status: payment.installment.status,
         }
       : null,
+  };
+}
+
+function serializePreviewSnapshot(state, now) {
+  return {
+    ...calculateDebtSnapshot(state, now),
+    dueDate: state.dueDate,
+    lastInterestPaidAt: state.lastInterestPaidAt,
+    settledAt: state.settledAt,
   };
 }
 
@@ -310,6 +320,207 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
   return { debt, installment: null };
 }
 
+async function buildPaymentPlan({ accountId, target, type, amount, note, tx }) {
+  const paymentsToCreate = [];
+
+  if (target.installment && type === 'PARCIAL') {
+    const existingPayments = await tx.payment.findMany({
+      where: {
+        installmentId: target.installment.id,
+        accountId,
+        deletedAt: null,
+      },
+    });
+    const alreadyPaidPrincipal = roundMoney(
+      existingPayments.reduce(
+        (sum, payment) => sum + installmentPrincipalPaid(payment),
+        0,
+      ),
+    );
+    const principalNeeded = roundMoney(
+      Math.max(Number(target.installment.amount || 0) - alreadyPaidPrincipal, 0),
+    );
+    const principalForInstallment = roundMoney(Math.min(amount, principalNeeded));
+    const extraForCharges = roundMoney(Math.max(amount - principalForInstallment, 0));
+
+    if (extraForCharges > MONEY_EPSILON) {
+      paymentsToCreate.push({
+        type: 'PARCIAL',
+        amount: extraForCharges,
+        installmentId: target.installment.id,
+        note: note ? `${note} (diaria/juros)` : 'Diaria/juros da parcela renegociada',
+      });
+    }
+
+    if (principalForInstallment > MONEY_EPSILON) {
+      paymentsToCreate.push({
+        type: 'PARCELA',
+        amount: principalForInstallment,
+        installmentId: target.installment.id,
+        note: note ? `${note} (principal da parcela)` : 'Principal da parcela renegociada',
+      });
+    }
+  }
+
+  if (!paymentsToCreate.length) {
+    paymentsToCreate.push({
+      type,
+      amount,
+      installmentId: target.installment ? target.installment.id : null,
+      note,
+    });
+  }
+
+  return paymentsToCreate;
+}
+
+async function previewPayment(req, res) {
+  try {
+    const clientId = Number(req.body.clientId);
+    const debtId = req.body.debtId ? Number(req.body.debtId) : null;
+    const installmentId = req.body.installmentId ? Number(req.body.installmentId) : null;
+    const amount = Number(req.body.amount || 0);
+    const type = normalizePaymentType(req.body.type);
+    const paidAt = req.body.paidAt
+      ? new Date(req.body.paidAt)
+      : req.body.date
+        ? new Date(req.body.date)
+        : new Date();
+    const note = req.body.note ? String(req.body.note).trim() : null;
+
+    if (!clientId || !amount || !type) {
+      return res.status(400).json({
+        message: 'clientId, amount e type sao obrigatorios',
+        data: {},
+      });
+    }
+
+    assertValidPaymentInput({ amount, paidAt });
+
+    if (type === 'PARCELA' && !installmentId) {
+      return res.status(400).json({
+        message: 'Pagamento de parcela exige installmentId',
+        data: {},
+      });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id: clientId,
+        accountId: req.user.accountId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
+    }
+
+    const preview = await prisma.$transaction(async (tx) => {
+      const target = await findDebtForPayment({
+        accountId: req.user.accountId,
+        clientId,
+        debtId,
+        installmentId,
+        tx,
+      });
+
+      if (!target.debt) {
+        throw new Error('DIVIDA_NAO_ENCONTRADA');
+      }
+
+      const paymentPlan = await buildPaymentPlan({
+        accountId: req.user.accountId,
+        target,
+        type,
+        amount,
+        note,
+        tx,
+      });
+
+      const existingPayments = await tx.payment.findMany({
+        where: {
+          debtId: target.debt.id,
+          accountId: req.user.accountId,
+          deletedAt: null,
+        },
+        orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+      });
+
+      const beforeSimulation = simulatePaymentsForDebt(target.debt, existingPayments);
+      const draftPayments = paymentPlan.map((item, index) => ({
+        id: 2147483000 + index,
+        type: item.type,
+        amount: item.amount,
+        paidAt,
+        installmentId: item.installmentId,
+        note: item.note,
+      }));
+      const afterSimulation = simulatePaymentsForDebt(target.debt, [
+        ...existingPayments,
+        ...draftPayments,
+      ]);
+      const appliedPayments = afterSimulation.computedPayments.slice(-draftPayments.length);
+      const applied = appliedPayments.reduce(
+        (acc, payment) => ({
+          amount: roundMoney(acc.amount + Number(payment.amount || 0)),
+          principalAmount: roundMoney(acc.principalAmount + Number(payment.principalAmount || 0)),
+          interestAmount: roundMoney(acc.interestAmount + Number(payment.interestAmount || 0)),
+          dailyAmount: roundMoney(acc.dailyAmount + Number(payment.dailyAmount || 0)),
+        }),
+        { amount: 0, principalAmount: 0, interestAmount: 0, dailyAmount: 0 },
+      );
+
+      return {
+        debt: {
+          id: target.debt.id,
+          title: target.debt.title,
+          kind: target.debt.kind,
+          debtType: target.debt.debtType,
+          dueDate: target.debt.dueDate,
+        },
+        installment: target.installment
+          ? {
+              id: target.installment.id,
+              installmentNumber: target.installment.installmentNumber,
+              amount: target.installment.amount,
+              dueDate: target.installment.dueDate,
+              status: target.installment.status,
+            }
+          : null,
+        requested: {
+          amount: roundMoney(amount),
+          type,
+          paidAt,
+        },
+        before: serializePreviewSnapshot(beforeSimulation.state, paidAt),
+        applied,
+        payments: appliedPayments,
+        after: serializePreviewSnapshot(afterSimulation.state, paidAt),
+      };
+    });
+
+    return res.json({
+      message: 'Previa de pagamento calculada',
+      data: preview,
+    });
+  } catch (err) {
+    console.log(err);
+    if (String(err.message).includes('DIVIDA_NAO_ENCONTRADA')) {
+      return res.status(404).json({ message: 'Divida nao encontrada para pagamento', data: {} });
+    }
+    if (String(err.message).includes('PARCELA_JA_PAGA')) {
+      return res.status(409).json({ message: 'Esta parcela ja esta paga', data: {} });
+    }
+    if (String(err.message).includes('VALOR_INVALIDO')) {
+      return res.status(400).json({ message: 'Informe um valor de pagamento maior que zero', data: {} });
+    }
+    if (String(err.message).includes('DATA_INVALIDA')) {
+      return res.status(400).json({ message: 'Informe uma data de pagamento valida', data: {} });
+    }
+    return res.status(500).json({ message: 'Erro ao calcular previa de pagamento', data: {} });
+  }
+}
+
 async function createPayment(req, res) {
   try {
     const clientId = Number(req.body.clientId);
@@ -365,55 +576,14 @@ async function createPayment(req, res) {
         throw new Error('DIVIDA_NAO_ENCONTRADA');
       }
 
-      const paymentsToCreate = [];
-
-      if (target.installment && type === 'PARCIAL') {
-        const existingPayments = await tx.payment.findMany({
-          where: {
-            installmentId: target.installment.id,
-            accountId: req.user.accountId,
-            deletedAt: null,
-          },
-        });
-        const alreadyPaidPrincipal = roundMoney(
-          existingPayments.reduce(
-            (sum, payment) => sum + installmentPrincipalPaid(payment),
-            0,
-          ),
-        );
-        const principalNeeded = roundMoney(
-          Math.max(Number(target.installment.amount || 0) - alreadyPaidPrincipal, 0),
-        );
-        const principalForInstallment = roundMoney(Math.min(amount, principalNeeded));
-        const extraForCharges = roundMoney(Math.max(amount - principalForInstallment, 0));
-
-        if (extraForCharges > MONEY_EPSILON) {
-          paymentsToCreate.push({
-            type: 'PARCIAL',
-            amount: extraForCharges,
-            installmentId: target.installment.id,
-            note: note ? `${note} (diaria/juros)` : 'Diaria/juros da parcela renegociada',
-          });
-        }
-
-        if (principalForInstallment > MONEY_EPSILON) {
-          paymentsToCreate.push({
-            type: 'PARCELA',
-            amount: principalForInstallment,
-            installmentId: target.installment.id,
-            note: note ? `${note} (principal da parcela)` : 'Principal da parcela renegociada',
-          });
-        }
-      }
-
-      if (!paymentsToCreate.length) {
-        paymentsToCreate.push({
-          type,
-          amount,
-          installmentId: target.installment ? target.installment.id : null,
-          note,
-        });
-      }
+      const paymentsToCreate = await buildPaymentPlan({
+        accountId: req.user.accountId,
+        target,
+        type,
+        amount,
+        note,
+        tx,
+      });
 
       const createdPaymentIds = [];
       let payment = null;
@@ -859,6 +1029,7 @@ async function getPaymentHistoryByClient(req, res) {
 
 module.exports = {
   createPayment,
+  previewPayment,
   updatePayment,
   deletePayment,
   getMyPayments,

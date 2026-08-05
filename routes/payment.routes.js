@@ -5,6 +5,7 @@ const authMiddleware = require('../authMiddleware');
 const adminMiddleware = require('../adminMiddleware');
 const {
   createPayment,
+  previewPayment,
   updatePayment,
   deletePayment,
   getMyPayments,
@@ -12,6 +13,7 @@ const {
   getPaymentHistoryByClient,
 } = require('../controllers/payment.controller');
 
+router.post('/preview', authMiddleware, adminMiddleware, previewPayment);
 router.post('/', authMiddleware, adminMiddleware, createPayment);
 router.put('/:id', authMiddleware, adminMiddleware, updatePayment);
 router.delete('/:id', authMiddleware, adminMiddleware, deletePayment);
