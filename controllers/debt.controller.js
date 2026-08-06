@@ -60,6 +60,81 @@ function isSameDay(left, right) {
   return startOfDay(left).getTime() === startOfDay(right).getTime();
 }
 
+function buildDraftDebtForUpdate(debt, body) {
+  const requestedDueDate = body.dueDate ? new Date(body.dueDate) : null;
+  const requestedOriginalDueDate = body.originalDueDate ? new Date(body.originalDueDate) : null;
+
+  // IMPORTANTE:
+  // - `originalDueDate` eh a data-base usada para reprocessar (replay) os pagamentos.
+  // - Ela NAO deve ser sobrescrita quando o frontend apenas reenviar `dueDate` sem o usuario mudar nada.
+  // - Para manter compatibilidade com o frontend atual (que envia `dueDate`), so tratamos `dueDate`
+  //   como alteracao de `originalDueDate` quando ele realmente difere do vencimento atual.
+  const nextOriginalDueDate =
+    requestedOriginalDueDate
+      ? requestedOriginalDueDate
+      : requestedDueDate && !isSameDay(requestedDueDate, debt.dueDate)
+        ? requestedDueDate
+        : debt.originalDueDate;
+
+  const draftDebt = {
+    ...debt,
+    title: body.title !== undefined ? String(body.title || '').trim() || null : debt.title,
+    debtType: body.debtType !== undefined
+      ? normalizeDebtType(body.debtType)
+      : debt.debtType || 'LOAN',
+    principalAmount:
+      body.principalAmount !== undefined || body.amount !== undefined || body.total !== undefined
+        ? Number(body.principalAmount ?? body.amount ?? body.total)
+        : debt.principalAmount,
+    principalOutstanding:
+      body.principalAmount !== undefined || body.amount !== undefined || body.total !== undefined
+        ? Number(body.principalAmount ?? body.amount ?? body.total)
+        : debt.principalAmount,
+    monthlyInterestMode: normalizeInterestMode(
+      body.monthlyInterestMode ?? debt.monthlyInterestMode,
+      body.interestPercent,
+      body.interestValue,
+    ) || debt.monthlyInterestMode,
+    monthlyInterestValue:
+      body.monthlyInterestMode !== undefined || body.monthlyInterestValue !== undefined || body.interestPercent !== undefined || body.interestValue !== undefined
+        ? (normalizeInterestMode(body.monthlyInterestMode, body.interestPercent, body.interestValue) === 'PERCENTAGE'
+            ? toNullableNumber(body.interestPercent ?? body.monthlyInterestValue)
+            : toNullableNumber(body.interestValue ?? body.monthlyInterestValue))
+        : debt.monthlyInterestValue,
+    dailyInterestMode: normalizeInterestMode(
+      body.dailyInterestMode ?? debt.dailyInterestMode,
+      body.dailyPercent,
+      body.dailyFee,
+    ) || debt.dailyInterestMode,
+    dailyInterestValue:
+      body.dailyInterestMode !== undefined || body.dailyInterestValue !== undefined || body.dailyPercent !== undefined || body.dailyFee !== undefined
+        ? (normalizeInterestMode(body.dailyInterestMode, body.dailyPercent, body.dailyFee) === 'PERCENTAGE'
+            ? toNullableNumber(body.dailyPercent ?? body.dailyInterestValue)
+            : toNullableNumber(body.dailyFee ?? body.dailyInterestValue))
+        : debt.dailyInterestValue,
+    borrowedAt: body.borrowedAt ? new Date(body.borrowedAt) : debt.borrowedAt,
+    originalDueDate: nextOriginalDueDate,
+    // `dueDate` atual sera recalculado via replay (buildDebtUpdateFromState), mas mantemos aqui o valor atual
+    // para nao confundir outros usos futuros do draft.
+    dueDate: debt.dueDate,
+    status: body.status ? String(body.status).toUpperCase() : debt.status,
+    deletedAt:
+      body.deletedAt !== undefined
+        ? (body.deletedAt ? new Date(body.deletedAt) : null)
+        : debt.deletedAt,
+  };
+
+  const normalizedDraftMonthlyInterest = normalizeDebtTypeInterest({
+    debtType: draftDebt.debtType,
+    monthlyInterestMode: draftDebt.monthlyInterestMode,
+    monthlyInterestValue: draftDebt.monthlyInterestValue,
+  });
+  draftDebt.monthlyInterestMode = normalizedDraftMonthlyInterest.monthlyInterestMode;
+  draftDebt.monthlyInterestValue = normalizedDraftMonthlyInterest.monthlyInterestValue;
+
+  return draftDebt;
+}
+
 async function getMyDebts(req, res) {
   try {
     const client = await prisma.client.findUnique({
@@ -214,6 +289,53 @@ async function getDebtsByClient(req, res) {
   }
 }
 
+async function previewDebtUpdate(req, res) {
+  try {
+    const debtId = Number(req.params.id);
+
+    if (!debtId) {
+      return res.status(400).json({ message: 'ID da divida invalido', data: {} });
+    }
+
+    const debt = await prisma.debt.findFirst({
+      where: {
+        id: debtId,
+        accountId: req.user.accountId,
+        deletedAt: null,
+      },
+      include: {
+        payments: {
+          where: { deletedAt: null },
+          orderBy: { paidAt: 'asc' },
+        },
+      },
+    });
+
+    if (!debt) {
+      return res.status(404).json({ message: 'Divida nao encontrada', data: {} });
+    }
+
+    const draftDebt = buildDraftDebtForUpdate(debt, req.body);
+    const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
+    const afterDebt = {
+      ...draftDebt,
+      ...buildDebtUpdateFromState(simulation.state),
+    };
+
+    return res.json({
+      message: 'Previa da edicao calculada',
+      data: {
+        before: enrichDebt(debt),
+        after: enrichDebt(afterDebt),
+        paymentCount: (debt.payments || []).length,
+      },
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'Erro ao calcular previa da divida', data: {} });
+  }
+}
+
 async function updateDebt(req, res) {
   try {
     const debtId = Number(req.params.id);
@@ -240,76 +362,7 @@ async function updateDebt(req, res) {
       return res.status(404).json({ message: 'Divida nao encontrada', data: {} });
     }
 
-    const requestedDueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
-    const requestedOriginalDueDate = req.body.originalDueDate ? new Date(req.body.originalDueDate) : null;
-
-    // IMPORTANTE:
-    // - `originalDueDate` eh a data-base usada para reprocessar (replay) os pagamentos.
-    // - Ela NAO deve ser sobrescrita quando o frontend apenas reenviar `dueDate` sem o usuario mudar nada.
-    // - Para manter compatibilidade com o frontend atual (que envia `dueDate`), so tratamos `dueDate`
-    //   como alteracao de `originalDueDate` quando ele realmente difere do vencimento atual.
-    const nextOriginalDueDate =
-      requestedOriginalDueDate
-        ? requestedOriginalDueDate
-        : requestedDueDate && !isSameDay(requestedDueDate, debt.dueDate)
-          ? requestedDueDate
-          : debt.originalDueDate;
-
-    const draftDebt = {
-      ...debt,
-      title: req.body.title !== undefined ? String(req.body.title || '').trim() || null : debt.title,
-      debtType: req.body.debtType !== undefined
-        ? normalizeDebtType(req.body.debtType)
-        : debt.debtType || 'LOAN',
-      principalAmount:
-        req.body.principalAmount !== undefined || req.body.amount !== undefined || req.body.total !== undefined
-          ? Number(req.body.principalAmount ?? req.body.amount ?? req.body.total)
-          : debt.principalAmount,
-      principalOutstanding:
-        req.body.principalAmount !== undefined || req.body.amount !== undefined || req.body.total !== undefined
-          ? Number(req.body.principalAmount ?? req.body.amount ?? req.body.total)
-          : debt.principalAmount,
-      monthlyInterestMode: normalizeInterestMode(
-        req.body.monthlyInterestMode ?? debt.monthlyInterestMode,
-        req.body.interestPercent,
-        req.body.interestValue,
-      ) || debt.monthlyInterestMode,
-      monthlyInterestValue:
-        req.body.monthlyInterestMode !== undefined || req.body.monthlyInterestValue !== undefined || req.body.interestPercent !== undefined || req.body.interestValue !== undefined
-          ? (normalizeInterestMode(req.body.monthlyInterestMode, req.body.interestPercent, req.body.interestValue) === 'PERCENTAGE'
-              ? toNullableNumber(req.body.interestPercent ?? req.body.monthlyInterestValue)
-              : toNullableNumber(req.body.interestValue ?? req.body.monthlyInterestValue))
-          : debt.monthlyInterestValue,
-      dailyInterestMode: normalizeInterestMode(
-        req.body.dailyInterestMode ?? debt.dailyInterestMode,
-        req.body.dailyPercent,
-        req.body.dailyFee,
-      ) || debt.dailyInterestMode,
-      dailyInterestValue:
-        req.body.dailyInterestMode !== undefined || req.body.dailyInterestValue !== undefined || req.body.dailyPercent !== undefined || req.body.dailyFee !== undefined
-          ? (normalizeInterestMode(req.body.dailyInterestMode, req.body.dailyPercent, req.body.dailyFee) === 'PERCENTAGE'
-              ? toNullableNumber(req.body.dailyPercent ?? req.body.dailyInterestValue)
-              : toNullableNumber(req.body.dailyFee ?? req.body.dailyInterestValue))
-          : debt.dailyInterestValue,
-      borrowedAt: req.body.borrowedAt ? new Date(req.body.borrowedAt) : debt.borrowedAt,
-      originalDueDate: nextOriginalDueDate,
-      // `dueDate` atual sera recalculado via replay (buildDebtUpdateFromState), mas mantemos aqui o valor atual
-      // para nao confundir outros usos futuros do draft.
-      dueDate: debt.dueDate,
-      status: req.body.status ? String(req.body.status).toUpperCase() : debt.status,
-      deletedAt:
-        req.body.deletedAt !== undefined
-          ? (req.body.deletedAt ? new Date(req.body.deletedAt) : null)
-          : debt.deletedAt,
-    };
-    const normalizedDraftMonthlyInterest = normalizeDebtTypeInterest({
-      debtType: draftDebt.debtType,
-      monthlyInterestMode: draftDebt.monthlyInterestMode,
-      monthlyInterestValue: draftDebt.monthlyInterestValue,
-    });
-    draftDebt.monthlyInterestMode = normalizedDraftMonthlyInterest.monthlyInterestMode;
-    draftDebt.monthlyInterestValue = normalizedDraftMonthlyInterest.monthlyInterestValue;
-
+    const draftDebt = buildDraftDebtForUpdate(debt, req.body);
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
 
     const updatedDebt = await prisma.debt.update({
@@ -441,6 +494,7 @@ module.exports = {
   getMyDebts,
   createDebt,
   getDebtsByClient,
+  previewDebtUpdate,
   updateDebt,
   deleteDebt,
   restoreDebt,
