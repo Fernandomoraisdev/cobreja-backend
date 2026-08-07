@@ -339,6 +339,7 @@ model Debt {
   dailyInterestMode     InterestMode?
   dailyInterestValue    Float?
   currentCycleInterestPaid Float     @default(0)
+  currentCycleDailyPaid Float     @default(0)
   borrowedAt            DateTime   @default(now())
   originalDueDate       DateTime   @default(now())
   dueDate               DateTime

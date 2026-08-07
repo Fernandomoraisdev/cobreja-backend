@@ -82,7 +82,10 @@ function calculateDailyAccruedAmount(debt, now = new Date()) {
     ? roundMoney(baseAmount * value / 100)
     : roundMoney(value);
 
-  return roundMoney(perDay * overdueDays);
+  const accrued = roundMoney(perDay * overdueDays);
+  return roundMoney(
+    Math.max(accrued - Number(debt.currentCycleDailyPaid || 0), 0),
+  );
 }
 
 function calculateDebtSnapshot(debt, now = new Date()) {
@@ -94,6 +97,7 @@ function calculateDebtSnapshot(debt, now = new Date()) {
     principalOutstanding,
   });
   const currentCycleInterestPaid = roundMoney(Number(debt.currentCycleInterestPaid || 0));
+  const currentCycleDailyPaid = roundMoney(Number(debt.currentCycleDailyPaid || 0));
   const interestOutstanding = roundMoney(
     Math.max(monthlyInterestAmount - currentCycleInterestPaid, 0),
   );
@@ -110,6 +114,7 @@ function calculateDebtSnapshot(debt, now = new Date()) {
     principalOutstanding,
     monthlyInterestAmount,
     currentCycleInterestPaid,
+    currentCycleDailyPaid,
     interestOutstanding,
     dailyAccruedAmount,
     overdueDays,
@@ -134,6 +139,7 @@ function toReplayState(debt) {
     dailyInterestMode: debt.dailyInterestMode || null,
     dailyInterestValue: Number(debt.dailyInterestValue || 0),
     currentCycleInterestPaid: 0,
+    currentCycleDailyPaid: 0,
     borrowedAt: new Date(debt.borrowedAt || debt.createdAt || new Date()),
     originalDueDate: new Date(debt.originalDueDate || debt.dueDate),
     dueDate: new Date(debt.originalDueDate || debt.dueDate),
@@ -146,6 +152,7 @@ function toReplayState(debt) {
 function markStateSettled(state, paidAt) {
   state.principalOutstanding = 0;
   state.currentCycleInterestPaid = 0;
+  state.currentCycleDailyPaid = 0;
   state.status = 'SETTLED';
   state.settledAt = new Date(paidAt);
 }
@@ -161,6 +168,7 @@ function maybeAdvanceCycle(state, snapshot, paidInterest, paidDaily, paidAt) {
     state.lastInterestPaidAt = new Date(paidAt);
     state.dueDate = addMonthsKeepingDay(state.dueDate, 1);
     state.currentCycleInterestPaid = 0;
+    state.currentCycleDailyPaid = 0;
   }
 }
 
@@ -170,6 +178,9 @@ function applyInterestPaymentToState(state, amount, paidAt) {
 
   const paidDaily = roundMoney(Math.min(remaining, snapshot.dailyAccruedAmount));
   remaining = roundMoney(remaining - paidDaily);
+  state.currentCycleDailyPaid = roundMoney(
+    Number(state.currentCycleDailyPaid || 0) + paidDaily,
+  );
 
   const appliedInterest = roundMoney(
     Math.min(remaining, snapshot.interestOutstanding),
@@ -194,6 +205,9 @@ function applyPartialPaymentToState(state, amount, paidAt) {
 
   const paidDaily = roundMoney(Math.min(remaining, snapshot.dailyAccruedAmount));
   remaining = roundMoney(remaining - paidDaily);
+  state.currentCycleDailyPaid = roundMoney(
+    Number(state.currentCycleDailyPaid || 0) + paidDaily,
+  );
 
   const paidInterest = roundMoney(Math.min(remaining, snapshot.interestOutstanding));
   state.currentCycleInterestPaid = roundMoney(
@@ -318,6 +332,7 @@ function buildDebtUpdateFromState(state) {
   return {
     principalOutstanding: roundMoney(state.principalOutstanding),
     currentCycleInterestPaid: roundMoney(state.currentCycleInterestPaid),
+    currentCycleDailyPaid: roundMoney(state.currentCycleDailyPaid),
     dueDate: new Date(state.dueDate),
     lastInterestPaidAt: state.lastInterestPaidAt ? new Date(state.lastInterestPaidAt) : null,
     status: state.status,

@@ -71,6 +71,32 @@ test('partial payments pay daily fee before remaining principal and stop accrual
   assert.equal(later.totalDue, 0);
 });
 
+test('partial daily payment remains deducted while debt is still overdue', () => {
+  const debt = standardDebt({
+    principalAmount: 10000,
+    principalOutstanding: 10000,
+    dailyInterestMode: 'FIXED',
+    dailyInterestValue: 20,
+  });
+
+  const result = simulatePaymentsForDebt(debt, [
+    {
+      id: 1,
+      type: 'PARCIAL',
+      amount: 100,
+      paidAt: date('2026-06-20'),
+    },
+  ]);
+
+  assert.equal(result.computedPayments[0].dailyAmount, 100);
+  assert.equal(result.computedPayments[0].principalAmount, 0);
+  assert.equal(result.state.currentCycleDailyPaid, 100);
+
+  const later = calculateDebtSnapshot(result.state, date('2026-06-25'));
+  assert.equal(later.dailyAccruedAmount, 100);
+  assert.equal(later.totalDue, 10100);
+});
+
 test('interest payment advances cycle when monthly interest and daily fee are fully covered', () => {
   const debt = standardDebt({
     principalAmount: 1000,
