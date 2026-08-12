@@ -122,3 +122,29 @@ test('interest payment advances cycle when monthly interest and daily fee are fu
   assert.equal(result.state.dueDate.toISOString(), date('2026-07-15').toISOString());
   assert.equal(result.state.currentCycleInterestPaid, 0);
 });
+
+test('renegotiated source debt stays frozen during payment replay', () => {
+  const debt = standardDebt({
+    id: 55,
+    status: 'RENEGOTIATED',
+    principalAmount: 800,
+    principalOutstanding: 800,
+    borrowedAt: date('2026-05-21'),
+    originalDueDate: date('2026-07-21'),
+    dueDate: date('2026-07-21'),
+  });
+
+  const result = simulatePaymentsForDebt(debt, [
+    {
+      id: 1,
+      type: 'PARCIAL',
+      amount: 100,
+      paidAt: date('2026-08-07'),
+    },
+  ]);
+
+  assert.equal(result.state.status, 'RENEGOTIATED');
+  assert.equal(result.state.principalOutstanding, 800);
+  assert.equal(result.state.dueDate.toISOString(), date('2026-07-21').toISOString());
+  assert.deepEqual(result.computedPayments, []);
+});

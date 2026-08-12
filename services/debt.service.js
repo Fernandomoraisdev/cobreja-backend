@@ -125,25 +125,47 @@ function calculateDebtSnapshot(debt, now = new Date()) {
   };
 }
 
+function isFrozenRenegotiatedSourceDebt(debt) {
+  return debt?.status === 'RENEGOTIATED' && debt?.kind !== 'RENEGOTIATED';
+}
+
 function toReplayState(debt) {
+  const frozenRenegotiatedSource = isFrozenRenegotiatedSourceDebt(debt);
+
   return {
     id: debt.id,
     kind: debt.kind,
     debtType: debt.debtType || 'LOAN',
     title: debt.title || null,
-    status: debt.deletedAt ? 'EXCLUDED' : 'ACTIVE',
+    status: debt.deletedAt
+      ? 'EXCLUDED'
+      : (frozenRenegotiatedSource ? 'RENEGOTIATED' : 'ACTIVE'),
     principalAmount: roundMoney(Number(debt.principalAmount || 0)),
-    principalOutstanding: roundMoney(Number(debt.principalAmount || 0)),
+    principalOutstanding: roundMoney(Number(
+      frozenRenegotiatedSource
+        ? debt.principalOutstanding ?? debt.principalAmount ?? 0
+        : debt.principalAmount || 0,
+    )),
     monthlyInterestMode: debt.monthlyInterestMode || null,
     monthlyInterestValue: Number(debt.monthlyInterestValue || 0),
     dailyInterestMode: debt.dailyInterestMode || null,
     dailyInterestValue: Number(debt.dailyInterestValue || 0),
-    currentCycleInterestPaid: 0,
-    currentCycleDailyPaid: 0,
+    currentCycleInterestPaid: frozenRenegotiatedSource
+      ? roundMoney(Number(debt.currentCycleInterestPaid || 0))
+      : 0,
+    currentCycleDailyPaid: frozenRenegotiatedSource
+      ? roundMoney(Number(debt.currentCycleDailyPaid || 0))
+      : 0,
     borrowedAt: new Date(debt.borrowedAt || debt.createdAt || new Date()),
     originalDueDate: new Date(debt.originalDueDate || debt.dueDate),
-    dueDate: new Date(debt.originalDueDate || debt.dueDate),
-    lastInterestPaidAt: null,
+    dueDate: new Date(
+      frozenRenegotiatedSource
+        ? debt.dueDate || debt.originalDueDate
+        : debt.originalDueDate || debt.dueDate,
+    ),
+    lastInterestPaidAt: frozenRenegotiatedSource && debt.lastInterestPaidAt
+      ? new Date(debt.lastInterestPaidAt)
+      : null,
     settledAt: null,
     deletedAt: debt.deletedAt ? new Date(debt.deletedAt) : null,
   };
@@ -295,6 +317,15 @@ function applyPaymentToState(state, payment) {
 
 function simulatePaymentsForDebt(debt, payments) {
   const state = toReplayState(debt);
+
+  if (isFrozenRenegotiatedSourceDebt(debt)) {
+    return {
+      state,
+      computedPayments: [],
+      snapshot: calculateDebtSnapshot(state),
+    };
+  }
+
   const ordered = [...payments].sort(
     (left, right) => {
       const dateCompare =
@@ -355,6 +386,7 @@ module.exports = {
   calculateOverdueDays,
   calculateDailyAccruedAmount,
   calculateDebtSnapshot,
+  isFrozenRenegotiatedSourceDebt,
   simulatePaymentsForDebt,
   buildDebtUpdateFromState,
   enrichDebt,
