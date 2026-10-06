@@ -19,9 +19,7 @@ function run(command, args) {
 }
 
 async function main() {
-  await run('npx', ['prisma', 'migrate', 'deploy']);
-  await run('node', ['scripts/create-backup.js', 'PRE_DEPLOY']);
-  await run('node', ['scripts/recalculate-debts.js']);
+  // Startup only. Maintenance must be invoked explicitly and separately.
   await run('node', ['index.js']);
 }
 

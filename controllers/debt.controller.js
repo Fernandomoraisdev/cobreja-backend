@@ -365,20 +365,34 @@ async function updateDebt(req, res) {
     const draftDebt = buildDraftDebtForUpdate(debt, req.body);
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
 
-    const updatedDebt = await prisma.debt.update({
-      where: { id: debtId },
-      data: {
-        title: draftDebt.title,
-        debtType: draftDebt.debtType,
-        principalAmount: draftDebt.principalAmount,
-        monthlyInterestMode: draftDebt.monthlyInterestMode,
-        monthlyInterestValue: draftDebt.monthlyInterestValue,
-        dailyInterestMode: draftDebt.dailyInterestMode,
-        dailyInterestValue: draftDebt.dailyInterestValue,
-        borrowedAt: draftDebt.borrowedAt,
-        originalDueDate: draftDebt.originalDueDate,
-        ...buildDebtUpdateFromState(simulation.state),
-      },
+    const updatedDebt = await prisma.$transaction(async (tx) => {
+      for (const computedPayment of simulation.computedPayments) {
+        await tx.payment.update({
+          where: { id: computedPayment.id },
+          data: {
+            amount: computedPayment.amount,
+            principalAmount: computedPayment.principalAmount,
+            interestAmount: computedPayment.interestAmount,
+            dailyAmount: computedPayment.dailyAmount,
+          },
+        });
+      }
+
+      return tx.debt.update({
+        where: { id: debtId },
+        data: {
+          title: draftDebt.title,
+          debtType: draftDebt.debtType,
+          principalAmount: draftDebt.principalAmount,
+          monthlyInterestMode: draftDebt.monthlyInterestMode,
+          monthlyInterestValue: draftDebt.monthlyInterestValue,
+          dailyInterestMode: draftDebt.dailyInterestMode,
+          dailyInterestValue: draftDebt.dailyInterestValue,
+          borrowedAt: draftDebt.borrowedAt,
+          originalDueDate: draftDebt.originalDueDate,
+          ...buildDebtUpdateFromState(simulation.state),
+        },
+      });
     });
 
     return res.json({

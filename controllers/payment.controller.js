@@ -281,6 +281,10 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
       return { debt: null, installment: null };
     }
 
+    if (debtId && installment.debt.id !== debtId) {
+      return { debt: null, installment: null };
+    }
+
     if (installment.status === 'PAID') {
       const err = new Error('PARCELA_JA_PAGA');
       err.statusCode = 409;
@@ -307,17 +311,14 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
     return { debt, installment: null };
   }
 
-  const debt = await tx.debt.findFirst({
-    where: {
-      clientId,
-      accountId,
-      status: 'ACTIVE',
-      deletedAt: null,
-    },
-    orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
-  });
+  return { debt: null, installment: null };
+}
 
-  return { debt, installment: null };
+function paymentTargetValidationMessage({ debtId, installmentId }) {
+  if (!debtId && !installmentId) {
+    return 'Pagamento exige debtId ou installmentId';
+  }
+  return null;
 }
 
 async function buildPaymentPlan({ accountId, target, type, amount, note, tx }) {
@@ -404,6 +405,11 @@ async function previewPayment(req, res) {
       });
     }
 
+    const targetValidationMessage = paymentTargetValidationMessage({ debtId, installmentId });
+    if (targetValidationMessage) {
+      return res.status(400).json({ message: targetValidationMessage, data: {} });
+    }
+
     const client = await prisma.client.findFirst({
       where: {
         id: clientId,
@@ -459,7 +465,10 @@ async function previewPayment(req, res) {
         ...existingPayments,
         ...draftPayments,
       ]);
-      const appliedPayments = afterSimulation.computedPayments.slice(-draftPayments.length);
+      const draftPaymentIds = new Set(draftPayments.map((payment) => payment.id));
+      const appliedPayments = afterSimulation.computedPayments.filter(
+        (payment) => draftPaymentIds.has(payment.id),
+      );
       const applied = appliedPayments.reduce(
         (acc, payment) => ({
           amount: roundMoney(acc.amount + Number(payment.amount || 0)),
@@ -550,6 +559,11 @@ async function createPayment(req, res) {
         message: 'Pagamento de parcela exige installmentId',
         data: {},
       });
+    }
+
+    const targetValidationMessage = paymentTargetValidationMessage({ debtId, installmentId });
+    if (targetValidationMessage) {
+      return res.status(400).json({ message: targetValidationMessage, data: {} });
     }
 
     const client = await prisma.client.findFirst({
