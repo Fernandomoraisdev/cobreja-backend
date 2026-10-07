@@ -60,6 +60,7 @@ async function getFinancialAnalytics(req, res) {
         include: {
           debts: {
             where: { deletedAt: null },
+            include: { payments: { where: { deletedAt: null } }, installments: true },
           },
         },
       }),

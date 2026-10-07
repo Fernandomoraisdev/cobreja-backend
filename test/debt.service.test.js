@@ -83,6 +83,7 @@ test('partial daily payment remains deducted while debt is still overdue', () =>
     {
       id: 1,
       type: 'PARCIAL',
+      debtId: 1,
       amount: 100,
       paidAt: date('2026-06-20'),
     },
@@ -97,7 +98,7 @@ test('partial daily payment remains deducted while debt is still overdue', () =>
   assert.equal(later.totalDue, 10100);
 });
 
-test('interest payment advances cycle when monthly interest and daily fee are fully covered', () => {
+test('interest payment retains original anchor and cumulative paid facts', () => {
   const debt = standardDebt({
     principalAmount: 1000,
     principalOutstanding: 1000,
@@ -111,6 +112,7 @@ test('interest payment advances cycle when monthly interest and daily fee are fu
     {
       id: 1,
       type: 'JUROS',
+      debtId: 1,
       amount: 300,
       paidAt: date('2026-06-25'),
     },
@@ -120,7 +122,7 @@ test('interest payment advances cycle when monthly interest and daily fee are fu
   assert.equal(result.computedPayments[0].interestAmount, 100);
   assert.equal(result.state.principalOutstanding, 1000);
   assert.equal(result.state.dueDate.toISOString(), date('2026-07-15').toISOString());
-  assert.equal(result.state.currentCycleInterestPaid, 0);
+  assert.equal(result.state.currentCycleInterestPaid, 100);
 });
 
 test('renegotiated source debt stays frozen during payment replay', () => {

@@ -7,6 +7,7 @@ const bcrypt = require('bcrypt');
 
 const baseClientInclude = {
   debts: {
+    include: { payments: { where: { deletedAt: null }, orderBy: [{ paidAt: 'asc' }, { id: 'asc' }] }, installments: true },
     orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
   },
   payments: {
@@ -798,6 +799,7 @@ async function getClientsSummary(req, res) {
         include: {
           debts: {
             where: { deletedAt: null },
+            include: { payments: { where: { deletedAt: null } }, installments: true },
           },
         },
       }),

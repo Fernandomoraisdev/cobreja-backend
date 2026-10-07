@@ -4,7 +4,7 @@ const {
   calculateDebtSnapshot,
   enrichDebt,
   roundMoney,
-} = require('../services/debt.service');
+} = require('../services/debt.service').compatibility;
 
 function normalizeInterestMode(value) {
   const normalized = String(value || '').trim().toUpperCase();

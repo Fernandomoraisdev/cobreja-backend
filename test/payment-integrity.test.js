@@ -88,6 +88,13 @@ function memory(seed = {}) {
     return rows.map((r) => project(name, r, args));
   }
   const db = {};
+  // Recording only: real locking semantics are verified by the opt-in PostgreSQL suite.
+  db.$queryRaw = async (strings, ...values) => {
+    assert.ok(depth > 0);
+    assert.match(strings.join('?'), /FOR UPDATE/);
+    calls.push({ name: 'debtLock', method: 'queryRaw', args: values, transactional: true });
+    return [];
+  };
   for (const name of names) {
     db[name] = {};
     for (const method of ['findFirst', 'findUnique', 'findMany', 'count', 'create', 'update', 'updateMany']) {
@@ -145,6 +152,7 @@ function sandbox(seed = {}, options = {}) {
     const module = { exports: {} };
     cache.set(filename, module);
     function dependency(id) {
+      if (id === 'node:crypto') return require('node:crypto');
       if (id === '../prisma') return mem.db;
       if (id.endsWith('/audit.service')) return { writeAuditLog: async (event) => audit.push(event) };
       if (id.endsWith('/mercadopago.service')) return options.mp || new Proxy({}, {
@@ -153,6 +161,10 @@ function sandbox(seed = {}, options = {}) {
       if (id.endsWith('/saas.service')) return { applySaasPaymentResult: async () => { throw new Error('Unexpected SaaS call'); } };
       if (id === 'child_process' && options.spawn) return { spawn: options.spawn };
       if (id.endsWith('/debt.service')) return load('services/debt.service.js');
+      if (id.endsWith('/payment-idempotency.service')) return load('services/payment-idempotency.service.js');
+      if (['./legacy-standard-engine', './legacy-money', './legacy-calendar'].includes(id)) {
+        return load(`services/${id.slice(2)}.js`);
+      }
       if (id.endsWith('/financial-engine-policy.service')) {
         return load('services/financial-engine-policy.service.js');
       }
@@ -245,7 +257,7 @@ test('multiple partial payments are replayed once and preserve cents', async () 
 test('total payment settles only its debt and stops future daily charges', async () => {
   const h = sandbox({ debt: [debt({ id: 1 }), debt({ id: 2 })] });
   const response = await invoke(h.load('controllers/payment.controller.js').createPayment, {
-    clientId: 1, debtId: 1, amount: 9999, type: 'TOTAL', paidAt: date('2026-01-20'),
+    clientId: 1, debtId: 1, amount: 1150, type: 'TOTAL', paidAt: date('2026-01-20'),
   });
   assert.equal(response.statusCode, 201);
   assert.equal(h.tables.debt[0].status, 'SETTLED');
@@ -275,14 +287,14 @@ test('partial payment applies daily then monthly interest then principal', () =>
   const service = sandbox().load('services/debt.service.js');
   const result = service.simulatePaymentsForDebt(debt(), [payment({
     amount: 250, paidAt: date('2026-01-20'),
-  })]);
+  })], date('2026-01-20'), [1]);
   assert.deepEqual(breakdown(result.computedPayments[0]), [250, 100, 100, 50]);
   assert.equal(result.state.principalOutstanding, 900);
 });
 
 test('retroactive preview reports the draft instead of a later existing payment', async () => {
-  const h = sandbox({ debt: [debt()], payment: [
-    payment({ id: 9, type: 'TOTAL', amount: 1150, paidAt: date('2026-01-20') }),
+  const h = sandbox({ debt: [debt({ monthlyInterestValue: 0, dailyInterestValue: 0 })], payment: [
+    payment({ id: 9, type: 'PARCIAL', amount: 100, principalAmount: 100, paidAt: date('2026-01-20') }),
   ] });
   const before = plain(h.tables);
   const response = await invoke(h.load('controllers/payment.controller.js').previewPayment, {
@@ -290,7 +302,7 @@ test('retroactive preview reports the draft instead of a later existing payment'
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.data.payments[0].id, 2147483000);
-  assert.deepEqual(breakdown(response.body.data.applied), [300, 200, 100, 0]);
+  assert.deepEqual(breakdown(response.body.data.applied), [300, 300, 0, 0]);
   assert.deepEqual(plain(h.tables), before);
 });
 
@@ -309,7 +321,7 @@ test('installment and explicit debt identifiers must refer to the same debt', as
   assert.deepEqual(h.tables.debt.map((item) => item.principalOutstanding), [1000, 1000]);
 });
 
-test('editing a debt atomically replays only its payment allocations', async () => {
+test('economic editing cannot reprice formed obligations or old payment allocations', async () => {
   const h = sandbox({
     debt: [
       debt({ id: 1, monthlyInterestValue: 0, dailyInterestValue: 0,
@@ -322,11 +334,12 @@ test('editing a debt atomically replays only its payment allocations', async () 
   const response = await invoke(h.load('controllers/debt.controller.js').updateDebt, {
     principalAmount: 1200,
   }, { id: '1' });
-  assert.equal(response.statusCode, 200);
-  assert.equal(h.tables.debt[0].principalAmount, 1200);
-  assert.equal(h.tables.debt[0].principalOutstanding, 1000);
-  assert.equal(h.tables.payment[0].principalAmount, 200);
-  assert.equal(h.tables.payment[0].interestAmount, 0);
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'PROSPECTIVE_RULE_VERSION_REQUIRED');
+  assert.equal(h.tables.debt[0].principalAmount, 1000);
+  assert.equal(h.tables.debt[0].principalOutstanding, 800);
+  assert.equal(h.tables.payment[0].principalAmount, 0);
+  assert.equal(h.tables.payment[0].interestAmount, 200);
   assert.equal(h.tables.debt[1].principalOutstanding, 1375);
   assert.ok(h.calls.filter((call) => call.method === 'update')
     .every((call) => call.transactional));
@@ -344,4 +357,124 @@ test('dashboard counts each persisted payment once across multiple debts', () =>
   assert.equal(summary.totalReceived, 200);
   assert.equal(summary.totalProfit, 0);
   assert.equal(summary.totalToReceive, 2000);
+});
+
+for (const operation of ['previewPayment', 'createPayment']) {
+  test(`${operation} rejects overpayment without truncating or changing either debt`, async () => {
+    const h = sandbox({ debt: [debt({ principalAmount: 700, principalOutstanding: 700, monthlyInterestValue: 0, dailyInterestValue: 0 }), debt({ id: 2 })] });
+    const before = plain(h.tables);
+    const response = await invoke(h.load('controllers/payment.controller.js')[operation], {
+      clientId: 1, debtId: 1, amount: 800, type: 'PARCIAL', paidAt: date('2026-01-15'),
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.body.code, 'OVERPAYMENT');
+    assert.equal(response.body.data.maximum, '700.00');
+    assert.deepEqual(plain(h.tables), before);
+  });
+}
+test('new payment never rewrites valid historical decomposition', async () => {
+  const h = sandbox({ debt: [debt({ principalOutstanding: 800 })], payment: [
+    payment({ amount: 200, principalAmount: 200, interestAmount: 0, dailyAmount: 0 }),
+  ] });
+  const original = plain(h.tables.payment[0]);
+  const response = await invoke(h.load('controllers/payment.controller.js').createPayment, {
+    clientId: 1, debtId: 1, amount: 50, type: 'PARCIAL', paidAt: date('2026-01-16'),
+  });
+  assert.equal(response.statusCode, 201);
+  assert.deepEqual(plain(h.tables.payment[0]), original);
+  assert.equal(h.calls.filter(call => call.name === 'payment' && call.method === 'update' && call.args?.where?.id === 1).length, 0);
+});
+test('ambiguous historical decomposition blocks a new payment and rolls it back', async () => {
+  const h = sandbox({ debt: [debt({ monthlyInterestValue: 0, dailyInterestValue: 0, principalOutstanding: 800 })],
+    payment: [payment({ amount: 200, principalAmount: 0, interestAmount: 0, dailyAmount: 0 })] });
+  const before = plain(h.tables);
+  const response = await invoke(h.load('controllers/payment.controller.js').createPayment, {
+    clientId: 1, debtId: 1, amount: 50, type: 'PARCIAL', paidAt: date('2026-01-16'),
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'HISTORY_RECONCILIATION_REQUIRED');
+  assert.deepEqual(plain(h.tables), before);
+});
+test('title-only edit keeps historical payment and other debts unchanged', async () => {
+  const h = sandbox({ debt: [debt({ principalOutstanding: 800, monthlyInterestValue: 0, dailyInterestValue: 0 }), debt({ id: 2 })],
+    payment: [payment({ amount: 200, principalAmount: 200 })] });
+  const original = plain(h.tables.payment[0]);
+  const other = plain(h.tables.debt[1]);
+  const originalDebt = plain(h.tables.debt[0]);
+  const response = await invoke(h.load('controllers/debt.controller.js').updateDebt, { title: 'Fixture local' }, { id: '1' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(plain(h.tables.payment[0]), original);
+  assert.deepEqual(plain(h.tables.debt[1]), other);
+  assert.deepEqual(plain(h.tables.debt[0]), { ...originalDebt, title: 'Fixture local' });
+  assert.equal(response.body.data.snapshot.principalOutstanding, 800);
+});
+test('retroactive draft conflicting with a later full payment rejects without rewriting history', async () => {
+  const h = sandbox({ debt: [debt()], payment: [payment({ type: 'TOTAL', amount: 1150,
+    principalAmount: 1000, interestAmount: 100, dailyAmount: 50, paidAt: date('2026-01-20') })] });
+  const before = plain(h.tables);
+  const response = await invoke(h.load('controllers/payment.controller.js').previewPayment, {
+    clientId: 1, debtId: 1, amount: 300, type: 'PARCIAL', paidAt: date('2026-01-15'),
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'OVERPAYMENT');
+  assert.deepEqual(plain(h.tables), before);
+});
+test('missing payment history never falls back to aggregate balance for STANDARD', () => {
+  const service = sandbox().load('services/debt.service.js');
+  assert.throws(() => service.calculateDebtSnapshot(debt({ principalOutstanding: 800 })), /LEGACY_HISTORY_REQUIRED/);
+});
+test('Mercado Pago stays explicitly on its prior compatibility calculation', () => {
+  const service = sandbox().load('services/debt.service.js');
+  assert.equal(service.compatibility.calculateDebtSnapshot(debt(), date('2026-03-15')).interestOutstanding, 100);
+  assert.equal(service.calculateDebtSnapshot(debt(), date('2026-03-15')).interestOutstanding, 300);
+});
+
+test('current persisted settled loans are never reopened by a snapshot read', () => {
+  const service = sandbox().load('services/debt.service.js');
+  const snapshot = service.calculateDebtSnapshot(debt({ status: 'SETTLED', settledAt: date('2026-01-15'), principalOutstanding: 0,
+    payments: [payment({ amount: 1000, principalAmount: 1000 })] }), date('2026-03-15'));
+  assert.equal(snapshot.totalDue, 0);
+  assert.equal(snapshot.isSettled, true);
+});
+test('invalid administrative contract creation rolls back its new debt', async () => {
+  const h = sandbox();
+  const before = plain(h.tables);
+  const response = await invoke(h.load('controllers/debt.controller.js').createDebt, {
+    clientId: 1, principalAmount: 5000, borrowedAt: date('2026-01-15'), dueDate: date('2026-01-14'),
+    monthlyInterestMode: 'PERCENTAGE', monthlyInterestValue: 40,
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'INVALID_CONTRACT_DATES');
+  assert.deepEqual(plain(h.tables), before);
+});
+test('administrative loan creation uses corrected backend snapshot before transaction commits', async () => {
+  const h = sandbox();
+  const response = await invoke(h.load('controllers/debt.controller.js').createDebt, {
+    clientId: 1, principalAmount: 5000, borrowedAt: date('2026-01-15'), dueDate: date('2026-02-15'),
+    monthlyInterestMode: 'PERCENTAGE', monthlyInterestValue: 40,
+  });
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.body.data.snapshot.totalDue, 7000);
+  assert.equal(h.tables.debt.length, 1);
+  assert.ok(h.calls.find(call => call.name === 'debt' && call.method === 'create').transactional);
+});
+
+test('future-dated payment cannot commit without recognized allocation', async () => {
+  const h = sandbox({ debt: [debt()] });
+  const before = plain(h.tables);
+  const response = await invoke(h.load('controllers/payment.controller.js').createPayment, {
+    clientId: 1, debtId: 1, amount: 100, type: 'PARCIAL', paidAt: date('2026-01-21'),
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'FUTURE_PAYMENT_NOT_ALLOWED');
+  assert.deepEqual(plain(h.tables), before);
+});
+
+test('changing a payment type cannot retain an incompatible old allocation', async () => {
+  const h = sandbox({ debt: [debt({ principalOutstanding: 800 })], payment: [payment({ amount: 200, principalAmount: 200 })] });
+  const before = plain(h.tables);
+  const response = await invoke(h.load('controllers/payment.controller.js').updatePayment, { type: 'JUROS' }, { id: '1' });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.code, 'OVERPAYMENT');
+  assert.deepEqual(plain(h.tables), before);
 });

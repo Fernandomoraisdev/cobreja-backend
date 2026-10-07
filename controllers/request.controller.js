@@ -3,7 +3,7 @@ const {
   addMonthsKeepingDay,
   enrichDebt,
   roundMoney,
-} = require('../services/debt.service');
+} = require('../services/debt.service').compatibility;
 const { writeAuditLog } = require('../services/audit.service');
 
 function normalizePositiveInt(value, fallback = null) {

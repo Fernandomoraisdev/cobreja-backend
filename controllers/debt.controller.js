@@ -3,6 +3,8 @@ const {
   enrichDebt,
   simulatePaymentsForDebt,
   buildDebtUpdateFromState,
+  assertStandardEconomicEdit,
+  isStandardLoan,
 } = require('../services/debt.service');
 
 function normalizeInterestMode(mode, percentValue, fixedValue) {
@@ -153,6 +155,7 @@ async function getMyDebts(req, res) {
         deletedAt: null,
       },
       include: {
+        payments: { where: { deletedAt: null }, orderBy: [{ paidAt: 'asc' }, { id: 'asc' }] },
         installments: {
           orderBy: { installmentNumber: 'asc' },
         },
@@ -221,24 +224,29 @@ async function createDebt(req, res) {
       return res.status(404).json({ message: 'Cliente nao encontrado para esta conta', data: {} });
     }
 
-    const debt = await prisma.debt.create({
-      data: {
-        title: req.body.title ? String(req.body.title).trim() : null,
-        kind: 'STANDARD',
-        debtType,
-        status: 'ACTIVE',
-        principalAmount,
-        principalOutstanding: principalAmount,
-        monthlyInterestMode: monthlyInterest.monthlyInterestMode,
-        monthlyInterestValue: monthlyInterest.monthlyInterestValue,
-        dailyInterestMode,
-        dailyInterestValue,
-        borrowedAt,
-        originalDueDate: dueDate,
-        dueDate,
-        clientId,
-        accountId: req.user.accountId,
-      },
+    const debt = await prisma.$transaction(async (tx) => {
+      const created = await tx.debt.create({
+        data: {
+          title: req.body.title ? String(req.body.title).trim() : null,
+          kind: 'STANDARD',
+          debtType,
+          status: 'ACTIVE',
+          principalAmount,
+          principalOutstanding: principalAmount,
+          monthlyInterestMode: monthlyInterest.monthlyInterestMode,
+          monthlyInterestValue: monthlyInterest.monthlyInterestValue,
+          dailyInterestMode,
+          dailyInterestValue,
+          borrowedAt,
+          originalDueDate: dueDate,
+          dueDate,
+          clientId,
+          accountId: req.user.accountId,
+        },
+      });
+      // Validate financial reconstruction before allowing creation to commit.
+      enrichDebt(created);
+      return created;
     });
 
     return res.status(201).json({
@@ -247,6 +255,7 @@ async function createDebt(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') return res.status(409).json({ message: 'Contrato financeiro invalido.', code: err.code, data: {} });
     return res.status(500).json({ message: 'Erro ao criar divida', data: {} });
   }
 }
@@ -276,6 +285,7 @@ async function getDebtsByClient(req, res) {
         accountId: req.user.accountId,
         deletedAt: null,
       },
+      include: { payments: { where: { deletedAt: null }, orderBy: [{ paidAt: 'asc' }, { id: 'asc' }] }, installments: true },
       orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
     });
 
@@ -316,6 +326,7 @@ async function previewDebtUpdate(req, res) {
     }
 
     const draftDebt = buildDraftDebtForUpdate(debt, req.body);
+    assertStandardEconomicEdit(debt, draftDebt);
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
     const afterDebt = {
       ...draftDebt,
@@ -332,6 +343,7 @@ async function previewDebtUpdate(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') return res.status(409).json({ message: 'Alteracao exige historico de regras prospectivas.', code: err.code, data: {} });
     return res.status(500).json({ message: 'Erro ao calcular previa da divida', data: {} });
   }
 }
@@ -363,9 +375,15 @@ async function updateDebt(req, res) {
     }
 
     const draftDebt = buildDraftDebtForUpdate(debt, req.body);
+    assertStandardEconomicEdit(debt, draftDebt);
     const simulation = simulatePaymentsForDebt(draftDebt, debt.payments || []);
 
     const updatedDebt = await prisma.$transaction(async (tx) => {
+      if (isStandardLoan(debt, debt.payments)) {
+        // Economic edits were rejected above. Metadata must not backfill a
+        // historical balance or overwrite a concurrent payment projection.
+        return tx.debt.update({ where: { id: debtId }, data: { title: draftDebt.title } });
+      }
       for (const computedPayment of simulation.computedPayments) {
         await tx.payment.update({
           where: { id: computedPayment.id },
@@ -397,10 +415,11 @@ async function updateDebt(req, res) {
 
     return res.json({
       message: 'Divida atualizada com sucesso',
-      data: enrichDebt(updatedDebt),
+      data: enrichDebt({ ...updatedDebt, payments: simulation.computedPayments }),
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') return res.status(409).json({ message: 'Alteracao exige historico de regras prospectivas.', code: err.code, data: {} });
     return res.status(500).json({ message: 'Erro ao atualizar divida', data: {} });
   }
 }
@@ -488,6 +507,7 @@ async function restoreDebt(req, res) {
         ...buildDebtUpdateFromState(simulation.state),
       },
       include: {
+        payments: { where: { deletedAt: null }, orderBy: [{ paidAt: 'asc' }, { id: 'asc' }] },
         installments: {
           orderBy: { installmentNumber: 'asc' },
         },
@@ -496,7 +516,7 @@ async function restoreDebt(req, res) {
 
     return res.json({
       message: 'Divida restaurada com sucesso',
-      data: enrichDebt(restoredDebt),
+      data: enrichDebt({ ...restoredDebt, payments: simulation.computedPayments }),
     });
   } catch (err) {
     console.log(err);

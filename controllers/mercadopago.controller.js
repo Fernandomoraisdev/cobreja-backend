@@ -4,7 +4,7 @@ const {
   buildDebtUpdateFromState,
   roundMoney,
   simulatePaymentsForDebt,
-} = require('../services/debt.service');
+} = require('../services/debt.service').compatibility;
 const {
   createPixPayment,
   getMercadoPagoCredentialsForAccount,

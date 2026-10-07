@@ -6,8 +6,11 @@ const {
   buildDebtUpdateFromState,
   addMonthsKeepingDay,
   roundMoney,
+  isStandardLoan,
 } = require('../services/debt.service');
 const { writeAuditLog } = require('../services/audit.service');
+const { parseIdempotencyKey, paymentFingerprint, resolveOperationDebt,
+  readCompletedOperation, completeOperation } = require('../services/payment-idempotency.service');
 
 function startOfDay(value) {
   const date = new Date(value);
@@ -219,12 +222,13 @@ async function rebuildInstallmentsForRenegotiation(tx, renegotiationId) {
   }
 }
 
-async function recalculateDebtAndRelations(tx, debtId) {
+async function recalculateDebtAndRelations(tx, debtId, mutablePaymentIds = []) {
   if (!debtId) return null;
 
   const debt = await tx.debt.findFirst({
     where: { id: debtId },
     include: {
+      installments: true,
       payments: {
         where: { deletedAt: null },
         orderBy: { paidAt: 'asc' },
@@ -234,9 +238,22 @@ async function recalculateDebtAndRelations(tx, debtId) {
 
   if (!debt) return null;
 
-  const simulation = simulatePaymentsForDebt(debt, debt.payments || []);
+  const simulation = simulatePaymentsForDebt(debt, debt.payments || [], new Date(), mutablePaymentIds);
 
   for (const computedPayment of simulation.computedPayments) {
+    if (isStandardLoan(debt, debt.payments) && !mutablePaymentIds.includes(computedPayment.id)) {
+      const original = debt.payments.find(payment => payment.id === computedPayment.id);
+      if (['amount', 'principalAmount', 'interestAmount', 'dailyAmount'].some(
+        field => roundMoney(original[field] || 0) !== computedPayment[field],
+      )) {
+        const error = new Error('HISTORY_RECONCILIATION_REQUIRED');
+        error.name = 'LegacyFinancialError';
+        error.code = 'HISTORY_RECONCILIATION_REQUIRED';
+        error.details = {};
+        throw error;
+      }
+      continue;
+    }
     await tx.payment.update({
       where: { id: computedPayment.id },
       data: {
@@ -273,7 +290,7 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
         accountId,
       },
       include: {
-        debt: true,
+        debt: { include: { installments: true } },
       },
     });
 
@@ -307,6 +324,7 @@ async function findDebtForPayment({ accountId, clientId, debtId, installmentId, 
         status: 'ACTIVE',
         deletedAt: null,
       },
+      include: { installments: true },
     });
     return { debt, installment: null };
   }
@@ -321,7 +339,14 @@ function paymentTargetValidationMessage({ debtId, installmentId }) {
   return null;
 }
 
-async function buildPaymentPlan({ accountId, target, type, amount, note, tx }) {
+async function buildPaymentPlan({ accountId, target, type, amount, note, paidAt, tx }) {
+  if (isStandardLoan(target.debt) && new Date(paidAt) > new Date()) {
+    const error = new Error('FUTURE_PAYMENT_NOT_ALLOWED');
+    error.name = 'LegacyFinancialError';
+    error.code = 'FUTURE_PAYMENT_NOT_ALLOWED';
+    error.details = {};
+    throw error;
+  }
   const paymentsToCreate = [];
 
   if (target.installment && type === 'PARCIAL') {
@@ -422,6 +447,7 @@ async function previewPayment(req, res) {
     }
 
     const preview = await prisma.$transaction(async (tx) => {
+      await lockStandardDebt(tx, debtId, req.user.accountId);
       const target = await findDebtForPayment({
         accountId: req.user.accountId,
         clientId,
@@ -440,6 +466,7 @@ async function previewPayment(req, res) {
         type,
         amount,
         note,
+        paidAt,
         tx,
       });
 
@@ -455,6 +482,8 @@ async function previewPayment(req, res) {
       const beforeSimulation = simulatePaymentsForDebt(target.debt, existingPayments);
       const draftPayments = paymentPlan.map((item, index) => ({
         id: 2147483000 + index,
+        debtId: target.debt.id,
+        accountId: req.user.accountId,
         type: item.type,
         amount: item.amount,
         paidAt,
@@ -514,6 +543,9 @@ async function previewPayment(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') {
+      return res.status(409).json({ message: 'Operacao financeira nao permitida.', code: err.code, data: err.details });
+    }
     if (String(err.message).includes('DIVIDA_NAO_ENCONTRADA')) {
       return res.status(404).json({ message: 'Divida nao encontrada para pagamento', data: {} });
     }
@@ -530,8 +562,33 @@ async function previewPayment(req, res) {
   }
 }
 
+// Serialize STANDARD loan mutations before reading payments or writing a projection.
+// The lock is held by the same PostgreSQL transaction until commit/rollback.
+async function lockStandardDebt(tx, debtId, accountId) {
+  if (!debtId) return;
+  await tx.$queryRaw`SELECT "id" FROM "Debt"
+    WHERE "id" = ${debtId} AND "accountId" = ${accountId}
+      AND "kind" = 'STANDARD' AND "debtType" = 'LOAN' FOR UPDATE`;
+}
+
+async function assertPaymentUnchanged(tx, previous) {
+  const current = await tx.payment.findFirst({ where: {
+    id: previous.id, accountId: previous.accountId, deletedAt: null,
+  } });
+  const timestamp = value => value == null ? null : new Date(value).getTime();
+  const changed = current && (timestamp(current.updatedAt) !== timestamp(previous.updatedAt) ||
+    timestamp(current.paidAt) !== timestamp(previous.paidAt) ||
+    ['amount', 'type', 'note', 'receiptUrl', 'debtId', 'clientId', 'installmentId'].some(field => current[field] !== previous[field]));
+  if (!current || changed) {
+    const error = new Error('CONCURRENT_PAYMENT_CHANGE');
+    error.name = 'LegacyFinancialError'; error.code = 'CONCURRENT_PAYMENT_CHANGE'; error.details = {};
+    throw error;
+  }
+}
+
 async function createPayment(req, res) {
   try {
+    const idempotencyKey = parseIdempotencyKey(req.headers?.['idempotency-key']);
     const clientId = Number(req.body.clientId);
     const debtId = req.body.debtId ? Number(req.body.debtId) : null;
     const installmentId = req.body.installmentId ? Number(req.body.installmentId) : null;
@@ -553,6 +610,10 @@ async function createPayment(req, res) {
     }
 
     assertValidPaymentInput({ amount, paidAt });
+    if (idempotencyKey && ![clientId, debtId, installmentId].filter(value => value != null)
+      .every(value => Number.isSafeInteger(value) && value > 0 && value <= 2147483647)) {
+      return res.status(400).json({ message: 'Identificador de pagamento invalido', data: {} });
+    }
 
     if (type === 'PARCELA' && !installmentId) {
       return res.status(400).json({
@@ -577,7 +638,20 @@ async function createPayment(req, res) {
       return res.status(404).json({ message: 'Cliente nao encontrado', data: {} });
     }
 
-    const createdPayment = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      let operation = null;
+      if (idempotencyKey) {
+        const resolvedDebtId = await resolveOperationDebt(tx, {
+          accountId: req.user.accountId, clientId, debtId, installmentId,
+        });
+        operation = { accountId: req.user.accountId, debtId: resolvedDebtId, key: idempotencyKey,
+          fingerprint: paymentFingerprint({ clientId, debtId: resolvedDebtId, installmentId,
+            amount, type, paidAt: req.body.paidAt || req.body.date || null, note, receiptUrl }) };
+        const response = await readCompletedOperation(tx, operation);
+        if (response) return { response, replayed: true };
+      }
+      // Installments retain their existing path; STANDARD loans require explicit Debt.id.
+      if (!operation) await lockStandardDebt(tx, debtId, req.user.accountId);
       const target = await findDebtForPayment({
         accountId: req.user.accountId,
         clientId,
@@ -596,6 +670,7 @@ async function createPayment(req, res) {
         type,
         amount,
         note,
+        paidAt,
         tx,
       });
 
@@ -623,7 +698,7 @@ async function createPayment(req, res) {
         createdPaymentIds.push(payment.id);
       }
 
-      await recalculateDebtAndRelations(tx, target.debt.id);
+      await recalculateDebtAndRelations(tx, target.debt.id, createdPaymentIds);
 
       const refreshedPayments = await tx.payment.findMany({
         where: { id: { in: createdPaymentIds } },
@@ -642,9 +717,16 @@ async function createPayment(req, res) {
         throw new Error('PAGAMENTO_SEM_VALOR_APLICAVEL');
       }
 
-      return refreshedPayments[refreshedPayments.length - 1];
+      const finalPayment = refreshedPayments[refreshedPayments.length - 1];
+      const response = JSON.parse(JSON.stringify({
+        message: 'Pagamento registrado com sucesso', data: serializePayment(finalPayment),
+      }));
+      if (operation) await completeOperation(tx, { ...operation, response });
+      return { payment: finalPayment, response, replayed: false };
     });
 
+    if (result.replayed) return res.status(201).json(result.response);
+    const createdPayment = result.payment;
     await writeAuditLog({
       req,
       action: 'PAYMENT_CREATED',
@@ -661,12 +743,15 @@ async function createPayment(req, res) {
       },
     });
 
-    return res.status(201).json({
-      message: 'Pagamento registrado com sucesso',
-      data: serializePayment(createdPayment),
-    });
+    return res.status(201).json(result.response);
   } catch (err) {
+    if (err.name === 'PaymentIdempotencyError') {
+      return res.status(err.statusCode).json({ message: 'Operacao de pagamento nao permitida.', code: err.code, data: {} });
+    }
     console.log(err);
+    if (err.name === 'LegacyFinancialError') {
+      return res.status(409).json({ message: 'Operacao financeira nao permitida.', code: err.code, data: err.details });
+    }
     if (String(err.message).includes('DIVIDA_NAO_ENCONTRADA')) {
       return res.status(404).json({ message: 'Divida nao encontrada para pagamento', data: {} });
     }
@@ -735,12 +820,21 @@ async function updatePayment(req, res) {
         ? new Date(req.body.date)
         : existingPayment.paidAt;
     assertValidPaymentInput({ amount: nextAmount, paidAt: nextPaidAt });
+    if (isStandardLoan(existingPayment.debt) && new Date(nextPaidAt) > new Date()) {
+      const error = new Error('FUTURE_PAYMENT_NOT_ALLOWED');
+      error.name = 'LegacyFinancialError';
+      error.code = 'FUTURE_PAYMENT_NOT_ALLOWED';
+      error.details = {};
+      throw error;
+    }
     const nextNote = req.body.note !== undefined ? String(req.body.note || '').trim() || null : existingPayment.note;
     const nextReceiptUrl = req.body.receiptUrl !== undefined
       ? String(req.body.receiptUrl || '').trim() || null
       : existingPayment.receiptUrl;
 
     const updatedPayment = await prisma.$transaction(async (tx) => {
+      await lockStandardDebt(tx, existingPayment.debtId, req.user.accountId);
+      if (isStandardLoan(existingPayment.debt)) await assertPaymentUnchanged(tx, existingPayment);
       const payment = await tx.payment.update({
         where: { id: paymentId },
         data: {
@@ -758,7 +852,7 @@ async function updatePayment(req, res) {
       });
 
       if (payment.debtId) {
-        await recalculateDebtAndRelations(tx, payment.debtId);
+        await recalculateDebtAndRelations(tx, payment.debtId, [payment.id]);
       }
 
       return payment;
@@ -804,6 +898,9 @@ async function updatePayment(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') {
+      return res.status(409).json({ message: 'Operacao financeira nao permitida.', code: err.code, data: err.details });
+    }
     if (String(err.message).includes('VALOR_INVALIDO')) {
       return res.status(400).json({ message: 'Informe um valor de pagamento maior que zero', data: {} });
     }
@@ -848,6 +945,8 @@ async function deletePayment(req, res) {
       : null;
 
     await prisma.$transaction(async (tx) => {
+      await lockStandardDebt(tx, existingPayment.debtId, req.user.accountId);
+      if (isStandardLoan(debtBefore)) await assertPaymentUnchanged(tx, existingPayment);
       await tx.payment.update({
         where: { id: paymentId },
         data: { deletedAt: new Date() },
@@ -859,7 +958,7 @@ async function deletePayment(req, res) {
         // Se o pagamento removido era exatamente o ultimo juros (ciclo) registrado, esperamos que o vencimento
         // volte 1 mes. Se isso nao acontecer, geralmente eh sinal de `originalDueDate` ter sido sobrescrito
         // anteriormente. Tentamos reparar ajustando o `originalDueDate` para o valor coerente com o rollback.
-        if (shouldRollbackCycle && updatedDebt && expectedDueDate && !isSameDay(updatedDebt.dueDate, expectedDueDate)) {
+        if (!isStandardLoan(debtBefore) && shouldRollbackCycle && updatedDebt && expectedDueDate && !isSameDay(updatedDebt.dueDate, expectedDueDate)) {
           const debtAfter = await tx.debt.findFirst({
             where: { id: existingPayment.debtId },
             include: {
@@ -925,6 +1024,9 @@ async function deletePayment(req, res) {
     });
   } catch (err) {
     console.log(err);
+    if (err.name === 'LegacyFinancialError') {
+      return res.status(409).json({ message: 'Operacao financeira nao permitida.', code: err.code, data: err.details });
+    }
     return res.status(500).json({ message: 'Erro ao excluir pagamento', data: {} });
   }
 }

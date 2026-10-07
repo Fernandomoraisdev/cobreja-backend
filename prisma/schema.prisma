@@ -96,6 +96,7 @@ model Account {
   clients        Client[]
   debts          Debt[]
   payments       Payment[]
+  paymentCreationOperations PaymentCreationOperation[]
   paymentIntents PaymentIntent[]
   saasPaymentIntents SaasPaymentIntent[]
   webhookLogs    WebhookLog[]
@@ -361,6 +362,7 @@ model Debt {
   childDebts   Debt[]  @relation("DebtOrigin")
 
   payments     Payment[]
+  paymentCreationOperations PaymentCreationOperation[]
   paymentIntents PaymentIntent[]
   installments Installment[]
 
@@ -518,6 +520,22 @@ model Payment {
   @@index([clientId, paidAt])
   @@index([debtId, paidAt])
   @@index([accountId, deletedAt])
+}
+
+// Completed HTTP payment operations. Historical Payments need no key/backfill.
+model PaymentCreationOperation {
+  id          Int      @id @default(autoincrement())
+  key         String   @db.VarChar(128)
+  fingerprint String   @db.Char(64)
+  response    Json
+  createdAt   DateTime @default(now())
+
+  accountId Int
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  debtId    Int
+  debt      Debt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, debtId, key])
 }
 
 model PaymentIntent {

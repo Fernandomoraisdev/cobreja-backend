@@ -378,7 +378,8 @@ function enrichDebt(debt, now = new Date()) {
   };
 }
 
-module.exports = {
+// Original economics remain available ONLY for excluded modalities/providers.
+const compatibility = {
   MONEY_EPSILON,
   roundMoney,
   addMonthsKeepingDay,
@@ -390,4 +391,81 @@ module.exports = {
   simulatePaymentsForDebt,
   buildDebtUpdateFromState,
   enrichDebt,
+};
+
+const standard = require('./legacy-standard-engine');
+const decimalMoney = require('./legacy-money');
+const financialCalendar = require('./legacy-calendar');
+const standardStates = new WeakMap();
+const compatibilityStates = new WeakSet();
+
+function standardReplay(debt, payments, now = new Date(), draftPaymentIds = []) {
+  const bound = payments.map(payment => ({ ...payment,
+    ...(draftPaymentIds.includes(payment.id) ? { [standard.DRAFT_PAYMENT]: true } : {}),
+  }));
+  const result = standard.replayStandard(debt, bound, now);
+  standardStates.set(result.state, { debt, payments: bound });
+  return result;
+}
+
+function standardSnapshot(debt, now = new Date()) {
+  if (compatibilityStates.has(debt)) return compatibility.calculateDebtSnapshot(debt, now);
+  const source = standardStates.get(debt);
+  if (source) return standardReplay(source.debt, source.payments, now).snapshot;
+  if (!standard.isStandardLoan(debt)) return compatibility.calculateDebtSnapshot(debt, now);
+  if (debt.status === 'SETTLED' && debt.settledAt
+    && financialCalendar.civil(now) >= financialCalendar.civil(debt.settledAt)) {
+    // A historical closure is never reopened by a read. Corrections require an
+    // explicit separately authorized operation, not this in-memory backport.
+    return { ...compatibility.calculateDebtSnapshot(debt, now), principalOutstanding: 0,
+      interestOutstanding: 0, dailyAccruedAmount: 0, totalDue: 0,
+      overdueDays: 0, isOverdue: false, dueToday: false, isSettled: true };
+  }
+  if (!Array.isArray(debt.payments) && (
+    Number(debt.currentCycleInterestPaid || 0) !== 0 || Number(debt.currentCycleDailyPaid || 0) !== 0
+    || Number(debt.principalOutstanding) !== Number(debt.principalAmount)
+  )) throw new standard.LegacyFinancialError('LEGACY_HISTORY_REQUIRED');
+  return standardReplay(debt, debt.payments || [], now).snapshot;
+}
+
+function replayDebt(debt, payments, now = new Date(), draftPaymentIds = []) {
+  if (!standard.isStandardLoan(debt, payments)) {
+    const result = compatibility.simulatePaymentsForDebt(debt, payments);
+    compatibilityStates.add(result.state);
+    return result;
+  }
+  return standardReplay(debt, payments, now, draftPaymentIds);
+}
+
+function assertStandardEconomicEdit(before, after, now = new Date()) {
+  if (!standard.isStandardLoan(before)) return;
+  const economic = ['principalAmount', 'monthlyInterestMode', 'monthlyInterestValue',
+    'dailyInterestMode', 'dailyInterestValue', 'debtType', 'kind'];
+  const changed = economic.some(field => String(before[field] ?? '') !== String(after[field] ?? ''))
+    || new Date(before.borrowedAt).getTime() !== new Date(after.borrowedAt).getTime()
+    || new Date(before.originalDueDate).getTime() !== new Date(after.originalDueDate).getTime();
+  if (changed && (new Date(now) >= new Date(before.borrowedAt) || (before.payments || []).length)) {
+    throw new standard.LegacyFinancialError('PROSPECTIVE_RULE_VERSION_REQUIRED');
+  }
+}
+
+module.exports = {
+  ...compatibility,
+  roundMoney: value => decimalMoney.toLegacyNumber(decimalMoney.cents(value ?? 0)),
+  compatibility,
+  isStandardLoan: standard.isStandardLoan,
+  assertStandardEconomicEdit,
+  buildDebtUpdateFromState: state => standardStates.has(state) ? {
+    principalOutstanding: state.principalOutstanding,
+    currentCycleInterestPaid: state.currentCycleInterestPaid,
+    currentCycleDailyPaid: state.currentCycleDailyPaid,
+    dueDate: new Date(state.dueDate),
+    lastInterestPaidAt: state.lastInterestPaidAt ? new Date(state.lastInterestPaidAt) : null,
+    status: state.status,
+    settledAt: state.settledAt ? new Date(state.settledAt) : null,
+  } : compatibility.buildDebtUpdateFromState(state),
+  calculateDebtSnapshot: standardSnapshot,
+  calculateDailyAccruedAmount: (debt, now = new Date()) => standardSnapshot(debt, now).dailyAccruedAmount,
+  simulatePaymentsForDebt: replayDebt,
+  enrichDebt: (debt, now = new Date()) => ({ ...debt, snapshot: standardSnapshot(debt, now) }),
 };
